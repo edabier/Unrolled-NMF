@@ -59,6 +59,38 @@ def cqt_spec(signal, sample_rate, hop_length, fmin=librosa.note_to_hz('A0'), bin
     
     return spec_db, times, frequencies
 
+def vis_cqt_spectrogram(spec_np, times, frequencies, start, stop, min_freq, max_freq):
+    start_idx       = np.searchsorted(times, start)
+    stop_idx        = np.searchsorted(times, stop)
+    freq_start_idx  = np.searchsorted(frequencies, min_freq)
+    freq_stop_idx   = np.searchsorted(frequencies, max_freq)
+
+    spec_slice  = spec_np[freq_start_idx:freq_stop_idx, start_idx:stop_idx]
+    freq_slice  = frequencies[freq_start_idx:freq_stop_idx]
+    time_slice  = times[start_idx:stop_idx]
+
+    # Convert frequencies to note labels
+    note_labels = librosa.hz_to_note(freq_slice, octave=True, unicode=False)
+
+    # Plot
+    plt.figure(figsize=(12, 6))
+    plt.imshow(spec_slice, origin='lower', aspect='auto',
+               extent=[time_slice[0], time_slice[-1],
+                       0, len(freq_slice)])
+
+    plt.title("CQT Spectrogram (dB)")
+    plt.xlabel("Time (s)")
+    plt.ylabel("Notes")
+
+    # Set y-ticks to note names
+    step = max(1, len(note_labels) // 20)
+    plt.yticks(ticks=np.arange(0, len(note_labels), step),
+               labels=note_labels[::step])
+
+    plt.tight_layout()
+    plt.show()
+    return
+
 def vis_spectrogram(spec_np, times, frequencies, start, stop, min_freq, max_freq):
     start_idx   = np.searchsorted(times, start)
     stop_idx    = np.searchsorted(times, stop)

@@ -59,13 +59,15 @@ class Ah(nn.Module):
     
 def MU_iter(M, l, f, t, n_iter):
     # Multiplicative updates iterations
-    epsilon = 1e-3
-    W = torch.rand(n_iter, f, l) + epsilon
-    H = torch.rand(n_iter, l, t) + epsilon
+    W = torch.rand(n_iter, f, l)
+    H = torch.rand(n_iter, l, t)
+    
+    aw = Aw(w_size=f*l)
+    ah = Ah(h_size=l*t)
 
     for l in range(n_iter-1):
-        W[l+1] = W[l] * Aw(W[l]) * (M @ H[l].T) / (W[l] @ H[l] @ H[l].T)
-        H[l+1] = H[l] * Ah(H[l]) * (W[l+1].T @ M) / (W[l+1].T @ W[l+1] @ H[l])
+        W[l+1] = W[l] * aw(W[l]) * (M @ H[l].T) / (W[l] @ H[l] @ H[l].T)
+        H[l+1] = H[l] * ah(H[l]) * (W[l+1].T @ M) / (W[l+1].T @ W[l+1] @ H[l])
     
     M_hat = W[-1] @ H[-1]
     
