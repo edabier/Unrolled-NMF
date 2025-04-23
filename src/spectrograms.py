@@ -190,7 +190,6 @@ def midi_to_pianoroll(midi_path, waveform, n_time_steps, hop_length, sr=16000):
     piano_roll = midi.get_piano_roll(fs=sr / hop_length)[note_start:note_end]
 
     # Generate time axis for the MIDI file
-    print(waveform)
     num_samples = waveform.shape[0]
     duration = num_samples / sr
     times = np.linspace(0, duration, n_time_steps)
