@@ -7,43 +7,23 @@ import src.spectrograms as spec
 import os
 import librosa
 
-def init_W(folder_path, hop_length=512, bins_per_octave=36, n_bins=252):
-    templates = []
-    file_list = sorted([f for f in os.listdir(folder_path) if f.lower().endswith(('.wav'))])
-
-    for fname in file_list:
-        path = os.path.join(folder_path, fname)
-        y, sr = torchaudio.load(path)
-        spec_db, _, _ = spec.cqt_spec(y, sample_rate=sr, hop_length=hop_length,
-                                 bins_per_octave=bins_per_octave, n_bins=n_bins)
-        
-        # Choose frame with max energy (sum across frequencies)
-        energy_per_frame = np.sum(spec_db, axis=0)
-        best_frame_idx = np.argmax(energy_per_frame)
-        template = spec_db[:, best_frame_idx]
-
-        # Convert from dB to linear for multiplication use
-        template_lin = librosa.db_to_amplitude(template)
-
-        # Normalize
-        template_lin /= np.linalg.norm(template_lin) + 1e-8
-        
-        templates.append(template_lin)
-
-    # W of shape f * (88*4)
-    W = np.stack(templates, axis=1)
+def MU_iter(M, l, f, t, n_iter):
+    # Multiplicative updates iterations
+    M = torch.tensor(M)
+    W = torch.rand(n_iter, f, l)
+    H = torch.rand(n_iter, l, t)
     
-    return torch.tensor(W, dtype=torch.float32)
+    aw = Aw(w_size=f*l)
+    ah = Ah(h_size=l*t)
 
-def init_H(l, t, W, M, n_init_steps):
-    eps = 1e-8
-    H = torch.rand(l, t) + eps
-    # create H with n iterations of MU
+    for l in range(n_iter-1):
+        W[l+1] = W[l] * aw(W[l]) * (M @ H[l].T) / (W[l] @ H[l] @ H[l].T)
+        H[l+1] = H[l] * ah(H[l]) * (W[l+1].T @ M) / (W[l+1].T @ W[l+1] @ H[l])
     
-    for _ in range(n_init_steps):
-        H = H * (W.T @ M) / (W.T @ (W @ H) + eps)
+    M_hat = W[-1] @ H[-1]
     
-    return H
+    return W, H, M_hat
+    
 
 class Aw(nn.Module):
     """
@@ -147,24 +127,6 @@ class Ah_cnn(nn.Module):
         y = self.sigmoid(y)             # (l, 1, t)
         out = y.squeeze(1)              # (l, t)
         return out   
-    
-    
-def MU_iter(M, l, f, t, n_iter):
-    # Multiplicative updates iterations
-    M = torch.tensor(M)
-    W = torch.rand(n_iter, f, l)
-    H = torch.rand(n_iter, l, t)
-    
-    aw = Aw(w_size=f*l)
-    ah = Ah(h_size=l*t)
-
-    for l in range(n_iter-1):
-        W[l+1] = W[l] * aw(W[l]) * (M @ H[l].T) / (W[l] @ H[l] @ H[l].T)
-        H[l+1] = H[l] * ah(H[l]) * (W[l+1].T @ M) / (W[l+1].T @ W[l+1] @ H[l])
-    
-    M_hat = W[-1] @ H[-1]
-    
-    return W, H, M_hat
     
     
 class RALMU_block(nn.Module):

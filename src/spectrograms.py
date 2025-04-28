@@ -5,8 +5,9 @@ import pretty_midi
 import torchaudio.transforms as T
 import librosa
 
-
-# SFT Spectrogram:
+"""
+SFT Spectrogram
+"""
 def stft_spec(signal, sample_rate, n_fft, hop_length, min_mag):
     
     """
@@ -15,7 +16,10 @@ def stft_spec(signal, sample_rate, n_fft, hop_length, min_mag):
     hop_length :    number of samples the next window will move
     min_mag :       min value of stft magnitude that we consider (0 if under)
     """
-    
+    if signal.shape[0] > 1:
+        signal = signal.mean(dim=0, keepdim=True)
+        signal = signal.squeeze(0)
+        
     window      = torch.hann_window(n_fft)
     stft        = torch.stft(signal, n_fft, hop_length, window=window, center=False, return_complex=True)
     stft_mag    = stft.abs()
@@ -55,16 +59,21 @@ def vis_spectrogram(spec, times, frequencies, start, stop, min_freq, max_freq):
     plt.show()
     return 
 
-# CQT Spectrogram:
+"""
+CQT Spectrogram
+"""
 def cqt_spec(signal, sample_rate, hop_length, fmin=librosa.note_to_hz('A0'), bins_per_octave=36, n_bins=288, top_db=60):
     """
     Computes the CQT spectrogram
     """
     signal  = signal.squeeze().numpy()
+    if signal.shape[0] > 1: # Convert to mono if stereo
+        signal = np.mean(signal, axis=0)
     cqt     = librosa.cqt(y=signal, sr=sample_rate, hop_length=hop_length, fmin=fmin, n_bins=n_bins, bins_per_octave=bins_per_octave)
     
     # Convert magnitude to decibels
     spec = librosa.amplitude_to_db(np.abs(cqt), top_db=top_db)
+    spec = spec - spec.min() + 1e-8
     
     # Time axis
     num_frames  = spec.shape[1]
@@ -113,12 +122,14 @@ def vis_cqt_spectrogram(spec, times, frequencies, start, stop, set_note_label=Fa
         step = max(1, len(labels) // 20)
         plt.yticks(ticks=np.arange(0, len(labels), step),
                    labels=labels[::step])
-
+    plt.colorbar()
     plt.tight_layout()
     plt.show()
     return
 
-# ERB Spectrogram:
+"""
+ERB Spectrogram
+"""
 def erb_freq(f):
     return 9.26 * np.log(0.00437 * f + 1)
 
@@ -178,7 +189,9 @@ def vis_erb_spectrogram(spec, freqs, times, start, stop):
     plt.tight_layout()
     plt.show()
 
-# MIDI Processing
+"""
+MIDI processing
+"""
 def midi_to_pianoroll(midi_path, waveform, n_time_steps, hop_length, sr=16000):
     midi = pretty_midi.PrettyMIDI(midi_path)
 
