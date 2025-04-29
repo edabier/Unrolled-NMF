@@ -36,14 +36,14 @@ class MaestroNMFDataset(Dataset):
         spec_db, times_cqt, freq_cqt = spec.cqt_spec(waveform, sr, self.hop_length)
         M = spec_db#[:250,:900]
 
-        H_target, times_midi = spec.midi_to_pianoroll(midi_path, waveform, M.shape[1], self.hop_length, sr)
+        midi, times_midi = spec.midi_to_pianoroll(midi_path, waveform, M.shape[1], self.hop_length, sr)
 
-        return M, H_target
+        return M, midi
   
 """
 Initialisation NMF
 """
-def init_W(folder_path, hop_length=256, bins_per_octave=36, n_bins=288):
+def init_W(folder_path, hop_length=128, bins_per_octave=36, n_bins=288):
     """
     Creates a W matrix from all audio files contained in the input path
     By taking the column of highest energy of the CQT
@@ -148,33 +148,34 @@ def W_to_pitch(W, H, freqs, thresh=0.4):
     
     return  sorted_pitches, sorted_notes, sorted_W, sorted_H
   
-def WH_to_MIDI(W, notes, H, normalize=True, threshold=0.01, smoothing_window=5):
+def WH_to_MIDI(W, notes, H, normalize=False, threshold=0.01, smoothing_window=5, adaptative=True):
     """
     Form a MIDI format tensor from W and H
     """
-    midi = torch.zeros((109, H.shape[1]), dtype=torch.float32)
+    midi = torch.zeros((88, H.shape[1]), dtype=torch.float32)
     
     if normalize:
         H_max = torch.norm(H, 'fro')
     else:
         H_max = 1
         
-    activation_sums = {i: torch.zeros(H.shape[1], dtype=torch.float32) for i in range(21, 110)}
+    activations = {i: torch.zeros(H.shape[1], dtype=torch.float32) for i in range(0, 88)}
 
     # Sum the activation rows of the same note
     for i in range(W.shape[1]):
         midi_note = int(notes[i].item())  # Get the MIDI note
-        if 21 <= midi_note <= 108: # if note is valid
-            activation_sums[midi_note] += H[i, :] #/ H_max
+        activations[midi_note] += H[i, :]#/ H_max
     
-    for midi_note, activations in activation_sums.items():
-        if midi_note <= 108:
-            dynamic_threshold = threshold + torch.mean(activations[:smoothing_window])
-            active_indices = activations > dynamic_threshold
-            midi[midi_note, active_indices] = activations[active_indices]
+    for midi_note, activation in activations.items():
+        if midi_note <= 109:
+            if adaptative:
+                dynamic_threshold = threshold + torch.mean(activation[:smoothing_window])
+                active_indices = activation > dynamic_threshold
+            else:
+                active_indices = activation > threshold
+            midi[midi_note-21, active_indices] = activation[active_indices]
     
     return midi
-
 
 """
 Loss
@@ -250,7 +251,7 @@ def midi_loss(midi_hat, midi_gt):
     
     return normalized_loss
     
-def compute_loss(M, M_hat, midi_hat, midi, H_hat, lambda_rec=0.1, lambda_sparsity=0.01):
+def compute_loss(M, M_hat, midi, midi_hat, H_hat, lambda_rec=0.1, lambda_sparsity=0.01):
         
     # Reconstruction loss (KL)
     beta = 1 
@@ -278,9 +279,10 @@ def train(n_epochs, model, optimizer, loader, device):
     losses = []
     
     for epoch in range(n_epochs):
-        for M, H in loader:
+        for M, midi in loader:
 
             W_hat, H_hat, M_hat = model(M)
+            midi_hat = WH_to_MIDI(W_hat, H_hat)
             
             # if epoch == 1:
             #     print("W0 after first forward pass:")
@@ -288,7 +290,7 @@ def train(n_epochs, model, optimizer, loader, device):
             #     print("H0 after first forward pass:")
             #     print(model.H0.min(), model.H0.max())
             
-            loss = compute_loss(M, M_hat, H, H_hat)
+            loss = compute_loss(M, M_hat, midi, midi_hat, H_hat)
             losses.append(loss.detach().numpy())
             
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)

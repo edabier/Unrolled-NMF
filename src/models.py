@@ -2,7 +2,7 @@ import torch.nn as nn
 import torchaudio
 import numpy as np
 import torch
-import src.utils
+import src.utils as utils
 import src.spectrograms as spec
 import os
 import librosa

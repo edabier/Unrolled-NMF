@@ -210,7 +210,7 @@ def midi_to_pianoroll(midi_path, waveform, n_time_steps, hop_length, sr=16000):
 
     return torch.from_numpy(piano_roll), times
 
-def vis_midi(midi_mat, times, start, stop):
+def vis_midi( midi_mat, times, start, stop):
     start_idx = np.searchsorted(times, start)
     stop_idx = np.searchsorted(times, stop)
     time_slice = times[start_idx:stop_idx]
@@ -218,10 +218,29 @@ def vis_midi(midi_mat, times, start, stop):
     # Plotting
     plt.figure(figsize=(10, 5))
     plt.imshow(midi_mat, origin='lower', aspect='auto',
-                extent=[time_slice[0], time_slice[-1], 0, 88])  # pitch range A0-C8
-    plt.title("MIDI File")
+                extent=[time_slice[0], time_slice[-1], 21, 109], cmap='Greens')  # pitch range A0-C8
     plt.xlabel("Time (s)")
     plt.ylabel("Pitch")
+    plt.tight_layout()
+    plt.show()
+    return
+
+def compare_midi(midi_gt, midi_mat, times, start, stop):
+    start_idx = np.searchsorted(times, start)
+    stop_idx = np.searchsorted(times, stop)
+    time_slice = times[start_idx:stop_idx]
+    
+    # Plotting
+    plt.figure(figsize=(10, 5))
+    plt.imshow(midi_mat, origin='lower', aspect='auto',
+                extent=[time_slice[0], time_slice[-1], 21, 109], alpha=0.9, cmap='Reds')  # pitch range A0-C8
+    plt.imshow(midi_gt, origin='lower', aspect='auto',
+                extent=[time_slice[0], time_slice[-1], 21, 109], alpha=0.5, cmap="Greens")  # pitch range A0-C8
+    plt.title("Predicted vs. Ground truth MIDI Files")
+    plt.xlabel("Time (s)")
+    plt.ylabel("Pitch")
+    # plt.fill_between([start,stop-0.01],y1=0, y2=20, color="black", edgecolor='grey', hatch="/", label="Not valid MIDI notes")
+    # plt.legend()
     plt.tight_layout()
     plt.show()
     return
