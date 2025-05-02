@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import pretty_midi
 import torchaudio.transforms as T
 import librosa
+from scipy.interpolate import interp1d
 
 """
 SFT Spectrogram
@@ -192,7 +193,7 @@ def vis_erb_spectrogram(spec, freqs, times, start, stop):
 """
 MIDI processing
 """
-def midi_to_pianoroll(midi_path, waveform, n_time_steps, hop_length, sr=16000):
+def midi_to_pianoroll(midi_path, waveform, times, hop_length, sr=16000):
     midi = pretty_midi.PrettyMIDI(midi_path)
 
     # Keep only piano keys (A0-C8)
@@ -205,12 +206,17 @@ def midi_to_pianoroll(midi_path, waveform, n_time_steps, hop_length, sr=16000):
     # Generate time axis for the MIDI file
     num_samples = waveform.shape[0]
     duration = num_samples / sr
-    times = np.linspace(0, duration, n_time_steps)
+    # times = np.linspace(0, duration, n_time_steps)
+    
+    original_times = np.linspace(0, times[-1], piano_roll.shape[1])
+    interp_func = interp1d(original_times, piano_roll, axis=1, kind='nearest', fill_value=0, bounds_error=False)
+    piano_roll = interp_func(times)
+    
     piano_roll = (piano_roll > 0).astype(np.float32)
 
     return torch.from_numpy(piano_roll), times
 
-def vis_midi( midi_mat, times, start, stop):
+def vis_midi(midi_mat, times, start, stop):
     start_idx = np.searchsorted(times, start)
     stop_idx = np.searchsorted(times, stop)
     time_slice = times[start_idx:stop_idx]
@@ -225,14 +231,14 @@ def vis_midi( midi_mat, times, start, stop):
     plt.show()
     return
 
-def compare_midi(midi_gt, midi_mat, times, start, stop):
+def compare_midi(midi_gt, midi_hat, times, start, stop):
     start_idx = np.searchsorted(times, start)
     stop_idx = np.searchsorted(times, stop)
     time_slice = times[start_idx:stop_idx]
     
     # Plotting
     plt.figure(figsize=(10, 5))
-    plt.imshow(midi_mat, origin='lower', aspect='auto',
+    plt.imshow(midi_hat, origin='lower', aspect='auto',
                 extent=[time_slice[0], time_slice[-1], 21, 109], alpha=0.9, cmap='Reds')  # pitch range A0-C8
     plt.imshow(midi_gt, origin='lower', aspect='auto',
                 extent=[time_slice[0], time_slice[-1], 21, 109], alpha=0.5, cmap="Greens")  # pitch range A0-C8
