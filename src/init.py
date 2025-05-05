@@ -16,6 +16,12 @@ def init_W(folder_path, hop_length=128, bins_per_octave=36, n_bins=288):
     templates = []
     freqs     = []
     file_list = sorted([f for f in os.listdir(folder_path) if f.lower().endswith(('.wav'))])
+    
+    note_to_midi = {
+        'C': 0, 'C#': 1,'D': 2, 'D#': 3, 
+        'E': 4, 'F': 5, 'F#': 6, 'G': 7, 
+        'G#': 8, 'A': 9, 'A#': 10, 'B': 11
+    }
 
     for fname in file_list:
         path = os.path.join(folder_path, fname)
@@ -26,9 +32,14 @@ def init_W(folder_path, hop_length=128, bins_per_octave=36, n_bins=288):
         
         spec_db, _, freq = spec.cqt_spec(y, sample_rate=sr, hop_length=hop_length,
                                  bins_per_octave=bins_per_octave, n_bins=n_bins)
-        freqs.append(freq)
         
         # Choose frame with max energy (sum across frequencies)
+        if len(fname) == 7:
+            note, octave = fname[0:2], int(fname[2])
+        else:
+            note, octave = fname[0], int(fname[1])
+        midi_note = note_to_midi[note] + (octave + 2) * 12  - 12 # MIDI note number
+        expected_freq = midi_to_hz(torch.tensor(midi_note, dtype=torch.float32))
         energy_per_frame = np.sum(spec_db, axis=0)
         best_frame_idx = np.argmax(energy_per_frame)
         template = spec_db[:, best_frame_idx]
@@ -40,6 +51,7 @@ def init_W(folder_path, hop_length=128, bins_per_octave=36, n_bins=288):
         template_lin /= np.linalg.norm(template_lin) + 1e-8
         
         templates.append(template_lin)
+        freqs.append(expected_freq)
 
     # W of shape f * (88*4)
     W = np.stack(templates, axis=1)
@@ -79,6 +91,7 @@ def frequency_to_note(frequency, thresh):
     We add a semitones thresholding to account for small variations in the frequency
     """
     
+    frequency = torch.tensor(frequency, dtype=torch.float32)
     midi_note = hz_to_midi(frequency)
     note_frequency = midi_to_hz(torch.round(midi_note))
     semitone_diff = torch.abs(midi_note - hz_to_midi(note_frequency))
@@ -88,32 +101,59 @@ def frequency_to_note(frequency, thresh):
         return torch.round(midi_note)
     else:
         return torch.tensor(0, dtype=torch.float32)
-  
+
 def W_to_pitch(W, H, freqs, thresh=0.4):
     """
-    Assign a pitch to every column of W
-    freqs being the frequency correspondance of every column's sample
+    Assign a pitch to every column of W.
+    freqs being the frequency correspondence of every column's sample.
     """
-    pitches = torch.empty(W.shape[1], dtype=torch.float32)
-    notes   = torch.empty(W.shape[1])
-    for i in range(W.shape[1]):
-        freq        = freqs[i]
-        y           = W[:,i]
-        y           = y.squeeze() # Ensure y is a 1D tensor
-        max_idx     = torch.argmax(y)
-        pitch       = torch.as_tensor(freq[max_idx.item()], dtype=torch.float32)
-        pitches[i]  = pitch
-        notes[i]    = frequency_to_note(pitch, thresh) 
     
+    pitches = torch.empty(W.shape[1], dtype=torch.float32)
+    notes = torch.empty(W.shape[1])
+    
+    for i in range(W.shape[1]):
+        pitch = freqs[i]  # Use the known frequency for the note
+        pitches[i] = pitch
+        notes[i] = frequency_to_note(pitch, thresh) - 21
+
     sorted_indices = torch.argsort(pitches)
     sorted_pitches = pitches[sorted_indices]
     sorted_notes = notes[sorted_indices]
-    sorted_W = W[:, sorted_indices] 
-    sorted_H = H[sorted_indices, :]     
+    sorted_W = W[:, sorted_indices]
+    sorted_H = H[sorted_indices, :]
+
+    return sorted_pitches, sorted_notes, sorted_W, sorted_H
+
+# def W_to_pitch(W, H, freqs, thresh=0.4):
+#     """
+#     Assign a pitch to every column of W
+#     freqs being the frequency correspondance of every column's sample
+#     """
+#     pitches     = torch.empty(W.shape[1], dtype=torch.float32)
+#     notes       = torch.empty(W.shape[1])
     
-    return  sorted_pitches, sorted_notes, sorted_W, sorted_H
+#     # Generate the list of frequencies
+#     # midi_notes  = torch.arange(21, 109)
+#     # freqs       = midi_to_hz(midi_notes)
+    
+#     for i in range(W.shape[1]):
+#         freq        = freqs[i]
+#         y           = W[:,i]
+#         y           = y.squeeze() # Ensure y is a 1D tensor
+#         max_idx     = torch.argmax(y)
+#         pitch       = torch.as_tensor(freq[max_idx.item()], dtype=torch.float32)
+#         pitches[i]  = pitch
+#         notes[i]    = frequency_to_note(pitch, thresh) 
+    
+#     sorted_indices = torch.argsort(pitches)
+#     sorted_pitches = pitches[sorted_indices]
+#     sorted_notes = notes[sorted_indices]
+#     sorted_W = W[:, sorted_indices] 
+#     sorted_H = H[sorted_indices, :]     
+    
+#     return  sorted_pitches, sorted_notes, sorted_W, sorted_H
   
-def WH_to_MIDI(W, notes, H, normalize=False, threshold=0.01, smoothing_window=5, adaptative=True):
+def WH_to_MIDI(W, H, notes, normalize=False, threshold=0.01, smoothing_window=5, adaptative=True):
     """
     Form a MIDI format tensor from W and H
     """
@@ -132,13 +172,13 @@ def WH_to_MIDI(W, notes, H, normalize=False, threshold=0.01, smoothing_window=5,
         activations[midi_note] += H[i, :]/ H_max
     
     for midi_note, activation in activations.items():
-        if midi_note <= 109:
+        if midi_note <= 108:
             if adaptative:
                 dynamic_threshold = threshold + torch.mean(activation[:smoothing_window])
                 active_indices = activation > dynamic_threshold
             else:
                 active_indices = activation > threshold
-            midi[midi_note-21, active_indices] = activation[active_indices]
+            midi[midi_note, active_indices] = activation[active_indices]
     
     active_midi = [i for i in range(88) if (midi[i,:]>0).any().item()]
     
