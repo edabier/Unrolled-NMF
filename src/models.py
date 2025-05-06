@@ -84,7 +84,7 @@ class Aw_cnn(nn.Module):
         super(Aw_cnn, self).__init__()
         self.conv1 = nn.Conv1d(in_channels, hidden_channels*2, kernel_size=5, padding=5 // 2)
         self.conv2 = nn.Conv1d(hidden_channels*2, hidden_channels, kernel_size=3, padding=3 // 2)
-        self.conv3 = nn.Conv1d(hidden_channels, 1, kernel_size=3, padding=0)
+        self.conv3 = nn.Conv1d(hidden_channels, 1, kernel_size=3, padding=1)
         self.relu  = nn.ReLU()
         # We use a sigmoid activation to limit values between 0 and 1
         # To avoid too big updates that could lead to exploding gradients
@@ -92,14 +92,16 @@ class Aw_cnn(nn.Module):
 
     # W shape: (f,l)
     def forward(self, x):
-        print(f"Aw forward: {x.shape}")
-        # x = x.permute(0, 2, 1)#.unsqueeze(1) # (l, 1, f)
+        # print(f"Aw in: {x.shape}") # (1, f, l)
+        batch_size, f, l = x.shape
+        x = x.view(batch_size * l, 1, f) # (l, 1, f)
         y = self.relu(self.conv1(x))     # (l, 64, f)
         y = self.relu(self.conv2(y))     # (l, 32, f)
         y = self.sigmoid(self.conv3(y))  # (l, 1, f)
-        out = y
-        # out = y.squeeze(1)#.permute(1, 0) # (f, l)
-        return out  
+        out = y.view(batch_size, l, f)
+        out = out.permute(0,2,1)
+        # print(f"Aw out: {out.shape}")
+        return out
    
     
 class Ah_cnn(nn.Module):
@@ -119,13 +121,15 @@ class Ah_cnn(nn.Module):
 
     # H shape: (l,t)
     def forward(self, x):
-        print(f"Ah forward: {x.shape}")
-        x = x.unsqueeze(1)              # (l, 1, t)
-        y = self.relu(self.conv1(x))    # (l, 64, t)
-        y = self.relu(self.conv2(y))    # (l, 32, t)
-        y = self.relu(self.conv3(y))    # (l, 1, t)
-        y = self.sigmoid(y)             # (l, 1, t)
-        out = y.squeeze(1)              # (l, t)
+        # print(f"Ah in: {x.shape}")      # (batch_size, l, t)
+        batch_size, l, t = x.shape
+        x = x.view(batch_size * l, 1, t)  # (batch_size * l, 1, t)
+        y = self.relu(self.conv1(x))    # (batch_size * l, 64, t)
+        y = self.relu(self.conv2(y))    # (batch_size * l, 32, t)
+        y = self.relu(self.conv3(y))    # (batch_size * l, 1, t)
+        out = self.sigmoid(y)           # (batch_size * l, 1, t)
+        out = out.view(batch_size, l, t)  #(batch_size, l, t)
+        # print(f"Ah out: {out.shape}")
         return out   
     
     
@@ -173,21 +177,14 @@ class RALMU_block2(nn.Module):
     """
     def __init__(self, beta=1, shared_aw=None, shared_ah=None, learnable_beta=False):
         super().__init__()
-        if shared_aw is not None:
-            self.Aw = shared_aw
-        else:
-            self.Aw = Aw_cnn()
-
-        if shared_ah is not None:
-            self.Ah = shared_ah
-        else:
-            self.Ah = Ah_cnn()
-
+        
+        self.Aw = shared_aw if shared_aw is not None else Aw_cnn()
+        self.Ah = shared_ah if shared_ah is not None else Ah_cnn()
         if learnable_beta:
-            self.beta = nn.Parameter(torch.tensor(beta))
+            self.beta = nn.Parameter(torch.tensor(beta)) 
         else:
+            # self.beta = beta
             self.register_buffer("beta", torch.tensor(beta))
-
         self.eps = 1e-6
 
     def forward(self, M, W, H):
@@ -196,9 +193,9 @@ class RALMU_block2(nn.Module):
         W = W.unsqueeze(0)  # Shape: (1, f, l)
         H = H.unsqueeze(0)  # Shape: (1, l, t)
         
-        print("M: ", M.shape)
-        print("W: ", W.shape)
-        print("H: ", H.shape)
+        # print("M: ", M.shape)
+        # print("W: ", W.shape)
+        # print("H: ", H.shape)
         
         wh = W @ H + self.eps
 
@@ -236,7 +233,7 @@ class RALMU_block2(nn.Module):
         H_new = H * self.Ah(H) * update_H
         H_new = torch.clamp(H_new, min=self.eps)
 
-        return W_new, H_new
+        return W_new.squeeze(0), H_new.squeeze(0)
 
 
 class RALMU(nn.Module):
@@ -249,6 +246,7 @@ class RALMU(nn.Module):
         self.n_iter         = n_iter
         self.n_init_steps   = n_init_steps
         self.shared         = shared
+        self.eps = eps
 
         # Optional shared MLPs
         shared_aw = Aw_cnn() if shared else None
@@ -265,8 +263,8 @@ class RALMU(nn.Module):
             self.H0 = self.register_buffer("H0", H.clone())
             print("copied W and H")
         else:
-            W0 = torch.rand(f, l) + eps
-            H0 = torch.rand(l, t) + eps
+            W0 = torch.rand(f, l) + self.eps
+            H0 = torch.rand(l, t) + self.eps
             self.register_buffer("W0", W0)
             self.register_buffer("H0", H0)
             print("initialized W and H")

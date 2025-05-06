@@ -102,7 +102,7 @@ def frequency_to_note(frequency, thresh):
     else:
         return torch.tensor(0, dtype=torch.float32)
 
-def W_to_pitch(W, H, freqs, thresh=0.4):
+def W_to_pitch(W, freqs, thresh=0.4, H=None):
     """
     Assign a pitch to every column of W.
     freqs being the frequency correspondence of every column's sample.
@@ -120,40 +120,13 @@ def W_to_pitch(W, H, freqs, thresh=0.4):
     sorted_pitches = pitches[sorted_indices]
     sorted_notes = notes[sorted_indices]
     sorted_W = W[:, sorted_indices]
-    sorted_H = H[sorted_indices, :]
-
-    return sorted_pitches, sorted_notes, sorted_W, sorted_H
-
-# def W_to_pitch(W, H, freqs, thresh=0.4):
-#     """
-#     Assign a pitch to every column of W
-#     freqs being the frequency correspondance of every column's sample
-#     """
-#     pitches     = torch.empty(W.shape[1], dtype=torch.float32)
-#     notes       = torch.empty(W.shape[1])
-    
-#     # Generate the list of frequencies
-#     # midi_notes  = torch.arange(21, 109)
-#     # freqs       = midi_to_hz(midi_notes)
-    
-#     for i in range(W.shape[1]):
-#         freq        = freqs[i]
-#         y           = W[:,i]
-#         y           = y.squeeze() # Ensure y is a 1D tensor
-#         max_idx     = torch.argmax(y)
-#         pitch       = torch.as_tensor(freq[max_idx.item()], dtype=torch.float32)
-#         pitches[i]  = pitch
-#         notes[i]    = frequency_to_note(pitch, thresh) 
-    
-#     sorted_indices = torch.argsort(pitches)
-#     sorted_pitches = pitches[sorted_indices]
-#     sorted_notes = notes[sorted_indices]
-#     sorted_W = W[:, sorted_indices] 
-#     sorted_H = H[sorted_indices, :]     
-    
-#     return  sorted_pitches, sorted_notes, sorted_W, sorted_H
+    if H is not None:
+        sorted_H = H[sorted_indices, :]
+        return sorted_pitches, sorted_notes, sorted_W, sorted_H
+    else:
+        return sorted_pitches, sorted_notes, sorted_W
   
-def WH_to_MIDI(W, H, notes, normalize=False, threshold=0.01, smoothing_window=5, adaptative=True):
+def WH_to_MIDI(W, H, notes, threshold=0.02, smoothing_window=5, adaptative=False, normalize=True):
     """
     Form a MIDI format tensor from W and H
     """
@@ -183,3 +156,46 @@ def WH_to_MIDI(W, H, notes, normalize=False, threshold=0.01, smoothing_window=5,
     active_midi = [i for i in range(88) if (midi[i,:]>0).any().item()]
     
     return midi, active_midi
+
+def WH_to_MIDI_tensor(W, H, notes, normalize=False, threshold=0.01, smoothing_window=5, adaptative=True):
+    """
+    Form a MIDI format tensor from W and H
+    """
+    batch_size = W.shape[0]
+    midi_list = []
+    active_midi_list = []
+
+    for b in range(batch_size):
+        W_b = W[b]  # (f, l)
+        H_b = H[b]  # (l, t)
+
+        midi = torch.zeros((88, H_b.shape[1]), dtype=torch.float32)
+
+        if normalize:
+            H_max = torch.norm(H_b, 'fro')
+        else:
+            H_max = 1
+
+        activations = {i: torch.zeros(H_b.shape[1], dtype=torch.float32) for i in range(0, 88)}
+
+        # Sum the activation rows of the same note
+        for i in range(W_b.shape[1]):
+            midi_note = int(notes[i].item())  # Get the MIDI note
+            activations[midi_note] += H_b[i, :] / H_max
+
+        for midi_note, activation in activations.items():
+            if midi_note <= 108:
+                if adaptative:
+                    dynamic_threshold = threshold + torch.mean(activation[:smoothing_window])
+                    active_indices = activation > dynamic_threshold
+                else:
+                    active_indices = activation > threshold
+                midi[midi_note, active_indices] = activation[active_indices]
+
+        active_midi = [i for i in range(88) if (midi[i, :] > 0).any().item()]
+
+        midi_list.append(midi)
+        active_midi_list.append(active_midi)
+
+    midi_tensor = torch.stack(midi_list)  # (batch_size, 88, t)
+    return midi_tensor, active_midi_list
