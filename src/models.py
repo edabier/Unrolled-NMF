@@ -4,6 +4,7 @@ import numpy as np
 import torch
 import src.utils as utils
 import src.spectrograms as spec
+import src.init as init
 import os
 import librosa
 
@@ -183,7 +184,6 @@ class RALMU_block2(nn.Module):
         if learnable_beta:
             self.beta = nn.Parameter(torch.tensor(beta)) 
         else:
-            # self.beta = beta
             self.register_buffer("beta", torch.tensor(beta))
         self.eps = 1e-6
 
@@ -238,15 +238,14 @@ class RALMU_block2(nn.Module):
 
 class RALMU(nn.Module):
     
-    def __init__(self, f, t, l=88, W=None, H=None, n_iter=10, n_init_steps=5, shared=False, eps=1e-5):
+    def __init__(self, f, t, l=88, eps=1e-5, W=None, H=None, n_iter=10, shared=False):
         super().__init__()
         self.f = f
         self.t = t
         self.l = l
-        self.n_iter         = n_iter
-        self.n_init_steps   = n_init_steps
-        self.shared         = shared
         self.eps = eps
+        self.n_iter = n_iter
+        self.shared = shared
 
         # Optional shared MLPs
         shared_aw = Aw_cnn() if shared else None
@@ -284,6 +283,76 @@ class RALMU(nn.Module):
             
             # W = torch.nan_to_num(W, nan=1e-6)
             # H = torch.nan_to_num(H, nan=1e-6)
+
+        M_hat = W @ H
+
+        return W, H, M_hat
+    
+    
+class RALMU2(nn.Module):
+    
+    def __init__(self, l=88, eps=1e-5, W_path=None, n_iter=10, n_init_steps=5, shared=False,):
+        super().__init__()
+        self.l      = l
+        self.eps    = eps
+        self.W_path = W_path
+        self.n_iter         = n_iter
+        self.n_init_steps   = n_init_steps
+        self.shared         = shared
+
+        shared_aw = Aw_cnn() if shared else None
+        shared_ah = Ah_cnn() if shared else None
+
+        # Unrolling layers
+        self.layers = nn.ModuleList([
+            RALMU_block2(shared_aw=shared_aw, shared_ah=shared_ah)
+            for _ in range(n_iter)
+        ])
+        
+        self.W_cache = {}
+        self.H_cache = {}
+            
+    def init_WH(self, M):
+        if len(M.shape) == 3:
+            # Batched input (training phase)
+            _, f, t = M.shape
+        elif len(M.shape) == 2:
+            # Non-batched input (inference phase)
+            f, t = M.shape
+            
+        shape_key = (f, t)
+
+        # Check if we've already initialized W and H for this shape (f,t)
+        if shape_key in self.W_cache:
+            W0 = self.W_cache[shape_key]
+            H0 = self.H_cache[shape_key]
+            print(f"Retrieved cached W and H")
+        else:
+            if self.W_path is not None:
+                W0, freqs = init.init_W(self.W_path)
+                H0 = init.init_H(self.l, t, W0, M, n_init_steps=self.n_init_steps)
+                if H0.dim() == 3:
+                    H0 = H0.squeeze(0)
+                print("Initialized W and H from files")
+            else:
+                W0 = torch.rand(f, self.l) + self.eps
+                H0 = torch.rand(self.l, t) + self.eps
+                print("Initialized random W and H")
+
+            # Store in cache
+            self.W_cache[shape_key] = W0
+            self.H_cache[shape_key] = H0
+            print(f"Cached W and H")
+
+        self.register_buffer("W0", W0)
+        self.register_buffer("H0", H0)
+
+    def forward(self, M):
+        W = self.W0
+        H = self.H0
+
+        for layer in self.layers:
+            W, H = layer(M, W, H)
 
         M_hat = W @ H
 

@@ -10,7 +10,7 @@ Initialisation NMF
 """
 def init_W(folder_path, hop_length=128, bins_per_octave=36, n_bins=288):
     """
-    Creates a W matrix from all audio files contained in the input path
+    Create a W matrix from all audio files contained in the input path
     By taking the column of highest energy of the CQT
     """
     templates = []
@@ -87,7 +87,7 @@ def midi_to_hz(midi_note):
 
 def frequency_to_note(frequency, thresh):
     """
-    Maps a frequency to its corresponding musical note.
+    Map a frequency to its corresponding musical note.
     We add a semitones thresholding to account for small variations in the frequency
     """
     
@@ -152,10 +152,19 @@ def WH_to_MIDI(W, H, notes, threshold=0.02, smoothing_window=5, adaptative=False
             else:
                 active_indices = activation > threshold
             midi[midi_note, active_indices] = activation[active_indices]
+            # if adaptative:
+            #     dynamic_threshold = threshold + torch.mean(activation[:smoothing_window])
+            # else:
+            #     dynamic_threshold = threshold
+            # # Use a sigmoid function for smooth thresholding
+            # smooth_activation = torch.sigmoid((activation - dynamic_threshold) / 0.1)
+            # midi[midi_note, :] = smooth_activation * activation
     
     active_midi = [i for i in range(88) if (midi[i,:]>0).any().item()]
+    scale_factor = 1 / midi.max()
+    midi_scaled = midi * scale_factor
     
-    return midi, active_midi
+    return midi_scaled, active_midi
 
 def WH_to_MIDI_tensor(W, H, notes, normalize=False, threshold=0.01, smoothing_window=5, adaptative=True):
     """
