@@ -12,10 +12,9 @@ import src.init as init
 
 class MaestroNMFDataset(Dataset):
     
-    def __init__(self, audio_dir, midi_dir, n_fft=4096, hop_length=128):
+    def __init__(self, audio_dir, midi_dir,hop_length=128):
         self.audio_files    = sorted(glob.glob(os.path.join(audio_dir, '*.wav')))
         self.midi_dir       = midi_dir
-        self.n_fft          = n_fft
         self.hop_length     = hop_length
 
     def __len__(self):
@@ -33,7 +32,6 @@ class MaestroNMFDataset(Dataset):
 
         spec_db, times_cqt, freq_cqt = spec.cqt_spec(waveform, sr, self.hop_length)
         midi, times_midi = spec.midi_to_pianoroll(midi_path, waveform, times_cqt, self.hop_length, sr)
-
         return spec_db, midi
 
 """
@@ -374,18 +372,21 @@ def train(n_epochs, model, optimizer, loader, device, criterion):
     model.H_cache = {}
     
     for epoch in range(n_epochs):
+        inter_loss = []
         for M, midi in loader:
             
-            model.init_WH(M)
             M = M.to(device)
             midi = midi.to(device)
+            model.init_WH(M)
 
             W_hat, H_hat, M_hat = model(M)
-            freqs = librosa.cqt_frequencies(n_bins=288, fmin=librosa.note_to_hz('A0'), bins_per_octave=36)
-            _, notes, _, _ = init.W_to_pitch(W_hat, freqs, H=H_hat)
-            midi_hat, active_midi = init.WH_to_MIDI(W_hat, H_hat, notes)
+            # assert W_hat is None or H_hat is None, "W or H got to None..."
+            _, notes, _, _ = init.W_to_pitch(W_hat, model.freqs, H=H_hat)
+            midi_hat, active_midi_hat = init.WH_to_MIDI(W_hat, H_hat, notes)
             M = M.squeeze(0)
             midi = midi.squeeze(0)
+            active_midi = [i for i in range(88) if (midi[i,:]>0).any().item()]
+            print(midi_hat[active_midi,:].min(), midi_hat[active_midi,:].max())
             
             # loss, monitor_loss1, monitor_loss2 = compute_loss(M, M_hat, midi, midi_hat, H_hat)
             # losses.append(loss.detach().numpy())
@@ -393,24 +394,23 @@ def train(n_epochs, model, optimizer, loader, device, criterion):
             # monitor_sparsity.append(monitor_loss2)
                     
             # nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
-            weight_mask = (midi > 0).float()
-            weight_mask = weight_mask / weight_mask.sum() * midi.numel()
-
+            
             optimizer.zero_grad()
-            
-            loss = 100*(criterion(midi_hat, midi) * weight_mask).mean()
-            
+            loss = criterion(midi_hat[active_midi,:], midi[active_midi,:])
+            inter_loss.append(loss.detach().numpy())
             loss.backward()
 
-            for param in model.parameters():
-                if param.grad is not None:
-                    print(f"Grad norm: {param.grad.norm().item()}")
-                else:
-                    print(f"Grad is None for {param}")
+            # for param in model.parameters():
+            #     if param.grad is not None:
+            #         print(f"Grad norm: {param.grad.norm().item()}")
+            #     else:
+            #         print(f"Grad is None for {param}")
                 
             optimizer.step()
-
-        print(f"Epoch {epoch+1}, Loss: {loss.item():.4f}")
+            
+            # print("------------ Next audio file... ------------")
+        losses.append(np.mean(inter_loss))
+        print(f"============= Epoch {epoch+1}, Loss: {np.mean(inter_loss)} =============")
     
     return losses#, monitor_reconstruct, monitor_sparsity
 

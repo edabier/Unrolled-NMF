@@ -87,9 +87,9 @@ class Aw_cnn(nn.Module):
         self.conv2 = nn.Conv1d(hidden_channels*2, hidden_channels, kernel_size=3, padding=3 // 2)
         self.conv3 = nn.Conv1d(hidden_channels, 1, kernel_size=3, padding=1)
         self.relu  = nn.ReLU()
-        # We use a sigmoid activation to limit values between 0 and 1
-        # To avoid too big updates that could lead to exploding gradients
-        self.sigmoid = nn.Sigmoid() 
+        # We use a softplus activation to force > 0 output
+        # and to avoid too big updates that could lead to exploding gradients
+        self.softplus = nn.Softplus() 
 
     # W shape: (f,l)
     def forward(self, x):
@@ -98,7 +98,7 @@ class Aw_cnn(nn.Module):
         x = x.view(batch_size * l, 1, f) # (l, 1, f)
         y = self.relu(self.conv1(x))     # (l, 64, f)
         y = self.relu(self.conv2(y))     # (l, 32, f)
-        y = self.sigmoid(self.conv3(y))  # (l, 1, f)
+        y = self.softplus(self.conv3(y)) # (l, 1, f)
         out = y.view(batch_size, l, f)
         out = out.permute(0,2,1)
         # print(f"Aw out: {out.shape}")
@@ -116,19 +116,19 @@ class Ah_cnn(nn.Module):
         self.conv2 = nn.Conv1d(hidden_channels*2, hidden_channels, kernel_size=3, padding=3 // 2)
         self.conv3 = nn.Conv1d(hidden_channels, 1, kernel_size=1, padding=0)
         self.relu  = nn.ReLU()
-        # We use a sigmoid activation to limit values between 0 and 1
-        # To avoid too big updates that could lead to exploding gradients
-        self.sigmoid = nn.Sigmoid() 
+        # We use a softplus activation to force > 0 output
+        # and to avoid too big updates that could lead to exploding gradients
+        self.softplus = nn.Softplus() 
 
     # H shape: (l,t)
     def forward(self, x):
         # print(f"Ah in: {x.shape}")      # (batch_size, l, t)
         batch_size, l, t = x.shape
         x = x.view(batch_size * l, 1, t)  # (batch_size * l, 1, t)
-        y = self.relu(self.conv1(x))    # (batch_size * l, 64, t)
-        y = self.relu(self.conv2(y))    # (batch_size * l, 32, t)
-        y = self.relu(self.conv3(y))    # (batch_size * l, 1, t)
-        out = self.sigmoid(y)           # (batch_size * l, 1, t)
+        y = self.relu(self.conv1(x))      # (batch_size * l, 64, t)
+        y = self.relu(self.conv2(y))      # (batch_size * l, 32, t)
+        y = self.relu(self.conv3(y))      # (batch_size * l, 1, t)
+        out = self.softplus(y)            # (batch_size * l, 1, t)
         out = out.view(batch_size, l, t)  #(batch_size, l, t)
         # print(f"Ah out: {out.shape}")
         return out   
@@ -192,10 +192,6 @@ class RALMU_block2(nn.Module):
         # Add channel dimension
         W = W.unsqueeze(0)  # Shape: (1, f, l)
         H = H.unsqueeze(0)  # Shape: (1, l, t)
-        
-        # print("M: ", M.shape)
-        # print("W: ", W.shape)
-        # print("H: ", H.shape)
         
         wh = W @ H + self.eps
 
@@ -291,10 +287,11 @@ class RALMU(nn.Module):
     
 class RALMU2(nn.Module):
     
-    def __init__(self, l=88, eps=1e-5, W_path=None, n_iter=10, n_init_steps=5, shared=False,):
+    def __init__(self, l=88, eps=1e-5, beta=2, W_path=None, n_iter=10, n_init_steps=100, shared=False,):
         super().__init__()
         self.l      = l
         self.eps    = eps
+        self.beta   = beta
         self.W_path = W_path
         self.n_iter         = n_iter
         self.n_init_steps   = n_init_steps
@@ -330,9 +327,10 @@ class RALMU2(nn.Module):
         else:
             if self.W_path is not None:
                 W0, freqs = init.init_W(self.W_path)
-                H0 = init.init_H(self.l, t, W0, M, n_init_steps=self.n_init_steps)
+                H0 = init.init_H(self.l, t, W0, M, n_init_steps=self.n_init_steps, beta=self.beta)
                 if H0.dim() == 3:
                     H0 = H0.squeeze(0)
+                self.freqs = freqs
                 print("Initialized W and H from files")
             else:
                 W0 = torch.rand(f, self.l) + self.eps
@@ -348,11 +346,17 @@ class RALMU2(nn.Module):
         self.register_buffer("H0", H0)
 
     def forward(self, M):
+        
+        assert hasattr(self, 'W0') or hasattr(self, 'H0'), "Please run init_WH, W0 or H0 are not initialized"
+        
         W = self.W0
         H = self.H0
 
-        for layer in self.layers:
+        for i, layer in enumerate(self.layers):
             W, H = layer(M, W, H)
+            # print("layer ",  i, ": ", W.min(), W.max(), H.min(), H.max())
+            if W is None or H is None:
+                print("W or H got to None")
 
         M_hat = W @ H
 

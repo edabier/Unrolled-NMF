@@ -73,8 +73,9 @@ def cqt_spec(signal, sample_rate, hop_length, fmin=librosa.note_to_hz('A0'), bin
     cqt     = librosa.cqt(y=signal, sr=sample_rate, hop_length=hop_length, fmin=fmin, n_bins=n_bins, bins_per_octave=bins_per_octave)
     
     # Convert magnitude to decibels
-    spec = librosa.amplitude_to_db(np.abs(cqt), top_db=top_db)
-    spec = spec - spec.min() + 1e-8
+    spec = np.abs(cqt)
+    # spec = librosa.amplitude_to_db(np.abs(cqt), top_db=top_db)
+    # spec = spec - spec.min() + 1e-8
     
     # Time axis
     num_frames  = spec.shape[1]
@@ -84,7 +85,16 @@ def cqt_spec(signal, sample_rate, hop_length, fmin=librosa.note_to_hz('A0'), bin
     # Frequency axis
     frequencies = librosa.cqt_frequencies(n_bins=n_bins, fmin=fmin, bins_per_octave=bins_per_octave)
     
-    return spec, times, frequencies
+    return torch.from_numpy(spec), times, frequencies
+
+def max_columns(W):
+    max_values, _ = torch.max(W, dim=0)
+    W_max = torch.zeros_like(W)
+    _, max_indices = torch.max(W, dim=0)
+    for col in range(W.shape[1]):
+        W_max[max_indices[col], col] = max_values[col]
+
+    return W_max
 
 def vis_cqt_spectrogram(spec, times, frequencies, start, stop, set_note_label=False):
     start_idx       = np.searchsorted(times, start)

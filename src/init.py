@@ -8,7 +8,7 @@ import src.spectrograms as spec
 """
 Initialisation NMF
 """
-def init_W(folder_path, hop_length=128, bins_per_octave=36, n_bins=288):
+def init_W(folder_path, hop_length=128, bins_per_octave=36, n_bins=288, avg_size=10):
     """
     Create a W matrix from all audio files contained in the input path
     By taking the column of highest energy of the CQT
@@ -40,9 +40,12 @@ def init_W(folder_path, hop_length=128, bins_per_octave=36, n_bins=288):
             note, octave = fname[0], int(fname[1])
         midi_note = note_to_midi[note] + (octave + 2) * 12  - 12 # MIDI note number
         expected_freq = midi_to_hz(torch.tensor(midi_note, dtype=torch.float32))
-        energy_per_frame = np.sum(spec_db, axis=0)
-        best_frame_idx = np.argmax(energy_per_frame)
-        template = spec_db[:, best_frame_idx]
+        energy_per_frame = spec_db.sum(axis=0)
+        # best_frame_idx = torch.argmax(energy_per_frame)
+        # template = spec_db[:, best_frame_idx]
+        _, top_indices = torch.topk(energy_per_frame, avg_size)
+        selected_frames = spec_db[:, top_indices]
+        template = torch.mean(selected_frames, dim=1)
 
         # Convert from dB to linear for multiplication use
         template_lin = librosa.db_to_amplitude(template)
@@ -53,10 +56,14 @@ def init_W(folder_path, hop_length=128, bins_per_octave=36, n_bins=288):
         templates.append(template_lin)
         freqs.append(expected_freq)
 
-    # W of shape f * (88*4)
-    W = np.stack(templates, axis=1)
+    sorted_indices = sorted(range(len(freqs)), key=lambda k: freqs[k])
+    templates = [templates[i] for i in sorted_indices]
+    freqs = [freqs[i] for i in sorted_indices]
     
-    return torch.tensor(W, dtype=torch.float32), freqs
+    # W of shape f * (88*n)
+    W = torch.stack(templates, axis=1)
+    
+    return W, freqs
 
 def init_H(l, t, W, M, n_init_steps, beta=1):
     eps = 1e-8
@@ -72,6 +79,8 @@ def init_H(l, t, W, M, n_init_steps, beta=1):
         denominator = W.T @ Wh_beta_minus_1 + eps
 
         H = H * (numerator / denominator)
+    
+    H = H / H.max()
     
     return H
 
