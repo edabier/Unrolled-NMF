@@ -2,11 +2,13 @@ import torch.nn as nn
 import torchaudio
 import numpy as np
 import torch
+import os
+import librosa
+import time
+
 import src.utils as utils
 import src.spectrograms as spec
 import src.init as init
-import os
-import librosa
 
 def MU_iter(M, l, f, t, n_iter):
     # Multiplicative updates iterations
@@ -326,11 +328,15 @@ class RALMU2(nn.Module):
             print(f"Retrieved cached W and H")
         else:
             if self.W_path is not None:
-                W0, freqs = init.init_W(self.W_path)
+                start = time.time()
+                W0, freqs, sr, freqs_true = init.init_W(self.W_path)
+                w_time = time.time()
                 H0 = init.init_H(self.l, t, W0, M, n_init_steps=self.n_init_steps, beta=self.beta)
+                h_time = time.time()
+                print(f"W init length: {w_time - start}, H init length: {h_time - w_time}")
                 if H0.dim() == 3:
                     H0 = H0.squeeze(0)
-                self.freqs = freqs
+                self.freqs = freqs_true
                 print("Initialized W and H from files")
             else:
                 W0 = torch.rand(f, self.l) + self.eps
@@ -354,7 +360,6 @@ class RALMU2(nn.Module):
 
         for i, layer in enumerate(self.layers):
             W, H = layer(M, W, H)
-            # print("layer ",  i, ": ", W.min(), W.max(), H.min(), H.max())
             if W is None or H is None:
                 print("W or H got to None")
 

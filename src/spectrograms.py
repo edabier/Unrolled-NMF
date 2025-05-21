@@ -9,13 +9,13 @@ from scipy.interpolate import interp1d
 """
 SFT Spectrogram
 """
-def stft_spec(signal, sample_rate, n_fft, hop_length, min_mag):
+def stft_spec(signal, sample_rate, n_fft, hop_length, min_mag=1e-5):
     
     """
     Computes the STFT spectrogram
     n_fft :         number of samples per window
     hop_length :    number of samples the next window will move
-    min_mag :       min value of stft magnitude that we consider (0 if under)
+    min_mag :       min value of stft magnitude that we consider (0 if under this value)
     """
     if signal.shape[0] > 1:
         signal = signal.mean(dim=0, keepdim=True)
@@ -25,9 +25,7 @@ def stft_spec(signal, sample_rate, n_fft, hop_length, min_mag):
     stft        = torch.stft(signal, n_fft, hop_length, window=window, center=False, return_complex=True)
     stft_mag    = stft.abs()
     stft_mag    = torch.clamp(stft_mag, min=min_mag)
-
-    # Convert to decibels
-    spec        = T.AmplitudeToDB(stype='power', top_db=60)(stft_mag)
+    spec        = stft_mag
     spec_np     = spec.numpy()
 
     # Convert number of frames into time in s
@@ -104,7 +102,13 @@ def vis_cqt_spectrogram(spec, times, frequencies, start, stop, set_note_label=Fa
     time_slice  = times[start_idx:stop_idx]
 
     # Convert frequencies to note labels
-    note_labels = librosa.hz_to_note(frequencies, octave=True, unicode=False)
+    # note_labels = librosa.hz_to_note(frequencies, octave=True, unicode=False)
+    note_labels = []
+    for freq in frequencies:
+        if freq == 0:
+            note_labels.append("0")
+        else:
+            note_labels.append(librosa.hz_to_note(freq, octave=True, unicode=False))
 
     # Plot
     plt.figure(figsize=(12, 6))
@@ -125,9 +129,9 @@ def vis_cqt_spectrogram(spec, times, frequencies, start, stop, set_note_label=Fa
         labels = []
         for f in frequencies:
             if f <= 1000:
-                labels.append(f"{f:.0f} Hz")  # Display Hz for low frequencies
+                labels.append(f"{f.item():.0f} Hz")  # Display Hz for low frequencies
             else:
-                labels.append(f"{f / 1000:.1f} kHz")  # Display kHz for high frequencies
+                labels.append(f"{f.item() / 1000:.1f} kHz")  # Display kHz for high frequencies
 
         # Set y-ticks for Hz and kHz
         step = max(1, len(labels) // 20)

@@ -386,7 +386,7 @@ def train(n_epochs, model, optimizer, loader, device, criterion):
             M = M.squeeze(0)
             midi = midi.squeeze(0)
             active_midi = [i for i in range(88) if (midi[i,:]>0).any().item()]
-            print(midi_hat[active_midi,:].min(), midi_hat[active_midi,:].max())
+            # print(midi_hat[active_midi,:].min(), midi_hat[active_midi,:].max())
             
             # loss, monitor_loss1, monitor_loss2 = compute_loss(M, M_hat, midi, midi_hat, H_hat)
             # losses.append(loss.detach().numpy())
@@ -400,11 +400,12 @@ def train(n_epochs, model, optimizer, loader, device, criterion):
             inter_loss.append(loss.detach().numpy())
             loss.backward()
 
-            # for param in model.parameters():
-            #     if param.grad is not None:
-            #         print(f"Grad norm: {param.grad.norm().item()}")
-            #     else:
-            #         print(f"Grad is None for {param}")
+            for param in model.parameters():
+                print(f"Grad norm: {param.grad.norm().item()}")
+                # if param.grad is not None:
+                #     print(f"Grad norm: {param.grad.norm().item()}")
+                # if param.grad < 1e-1:
+                    # print(f"Grad norm: {param.grad.norm().item()}")
                 
             optimizer.step()
             
