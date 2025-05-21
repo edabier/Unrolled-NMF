@@ -168,7 +168,7 @@ def WH_to_MIDI(W, H, notes, threshold=0.02, smoothing_window=5, adaptative=False
         
     activations = {i: torch.zeros(H.shape[1], dtype=torch.float32) for i in range(0, 88)}
 
-    # Sum the activation rows of the same notew
+    # Sum the activation rows of the same note
     for i in range(W.shape[1]):
         midi_note = int(notes[i].item())  # Get the MIDI note
         activations[midi_note] += H[i, :]/ H_max
@@ -188,6 +188,24 @@ def WH_to_MIDI(W, H, notes, threshold=0.02, smoothing_window=5, adaptative=False
             # # Use a sigmoid function for smooth thresholding
             # smooth_activation = torch.sigmoid((activation - dynamic_threshold) / 0.1)
             # midi[midi_note, :] = smooth_activation * activation
+            
+            diff = torch.diff(active_indices.float())
+            start_indices = torch.where(diff == 1)[0] + 1
+            end_indices = torch.where(diff == -1)[0] + 1
+
+            # Ensure the first and last segments are included
+            if active_indices[0]:
+                start_indices = torch.cat((torch.tensor([0]), start_indices))
+            if active_indices[-1]:
+                end_indices = torch.cat((end_indices, torch.tensor([len(active_indices)])))
+
+            # Calculate average intensity and set constant intensity for each segment
+            for start, end in zip(start_indices, end_indices):
+                segment_intensities = activation[start:end]
+                avg_intensity = segment_intensities.mean()
+                activation[start:end] = avg_intensity
+
+            midi[midi_note, active_indices] = activation[active_indices]
     
     active_midi = [i for i in range(88) if (midi[i,:]>0).any().item()]
     # scale_factor = 1 / midi.max()
