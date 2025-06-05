@@ -83,23 +83,29 @@ class Aw_cnn(nn.Module):
     Defining a 1D CNN (frequency axis) for Aw()
     1 channel -> 32 ch kernel=5 pad=2 -> 1 ch kernel=3 pad=1
     """
-    def __init__(self, in_channels=1, hidden_channels=32):
+    def __init__(self, in_channels=1, hidden_channels=2):
         super(Aw_cnn, self).__init__()
         self.conv1 = nn.Conv1d(in_channels, hidden_channels*2, kernel_size=5, padding=5 // 2)
         self.conv2 = nn.Conv1d(hidden_channels*2, hidden_channels, kernel_size=3, padding=3 // 2)
         self.conv3 = nn.Conv1d(hidden_channels, 1, kernel_size=3, padding=1)
-        self.relu  = nn.ReLU()
+        self.bn1 = nn.BatchNorm1d(hidden_channels*2)
+        self.bn2 = nn.BatchNorm1d(hidden_channels)
+        self.relu  = nn.LeakyReLU()
         # We use a softplus activation to force > 0 output
         # and to avoid too big updates that could lead to exploding gradients
         self.softplus = nn.Softplus() 
+        
+        # nn.init.kaiming_normal_(self.conv1.weight, mode='fan_in', nonlinearity='leaky_relu')
+        # nn.init.kaiming_normal_(self.conv2.weight, mode='fan_in', nonlinearity='leaky_relu')
+        # nn.init.kaiming_normal_(self.conv3.weight, mode='fan_in', nonlinearity='leaky_relu')
 
     # W shape: (f,l)
     def forward(self, x):
         # print(f"Aw in: {x.shape}") # (1, f, l)
         batch_size, f, l = x.shape
         x = x.view(batch_size * l, 1, f) # (l, 1, f)
-        y = self.relu(self.conv1(x))     # (l, 64, f)
-        y = self.relu(self.conv2(y))     # (l, 32, f)
+        y = self.relu(self.bn1(self.conv1(x)))     # (l, 64, f)
+        y = self.relu(self.bn2(self.conv2(y)))     # (l, 32, f)
         y = self.softplus(self.conv3(y)) # (l, 1, f)
         out = y.view(batch_size, l, f)
         out = out.permute(0,2,1)
@@ -116,73 +122,169 @@ class Ah_cnn(nn.Module):
         super(Ah_cnn, self).__init__()
         self.conv1 = nn.Conv1d(in_channels, hidden_channels*2, kernel_size=5, padding=5 // 2)
         self.conv2 = nn.Conv1d(hidden_channels*2, hidden_channels, kernel_size=3, padding=3 // 2)
-        self.conv3 = nn.Conv1d(hidden_channels, 1, kernel_size=1, padding=0)
-        self.relu  = nn.ReLU()
+        self.conv3 = nn.Conv1d(hidden_channels, 1, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm1d(hidden_channels*2)
+        self.bn2 = nn.BatchNorm1d(hidden_channels)
+        self.relu  = nn.LeakyReLU()
         # We use a softplus activation to force > 0 output
         # and to avoid too big updates that could lead to exploding gradients
         self.softplus = nn.Softplus() 
+        
+        nn.init.kaiming_normal_(self.conv1.weight, mode='fan_in', nonlinearity='leaky_relu')
+        nn.init.kaiming_normal_(self.conv2.weight, mode='fan_in', nonlinearity='leaky_relu')
+        nn.init.kaiming_normal_(self.conv3.weight, mode='fan_in', nonlinearity='leaky_relu')
 
     # H shape: (l,t)
     def forward(self, x):
         # print(f"Ah in: {x.shape}")      # (batch_size, l, t)
         batch_size, l, t = x.shape
         x = x.view(batch_size * l, 1, t)  # (batch_size * l, 1, t)
-        y = self.relu(self.conv1(x))      # (batch_size * l, 64, t)
-        y = self.relu(self.conv2(y))      # (batch_size * l, 32, t)
+        y = self.relu(self.bn1(self.conv1(x)))      # (batch_size * l, 64, t)
+        y = self.relu(self.bn2(self.conv2(y)))      # (batch_size * l, 32, t)
         y = self.relu(self.conv3(y))      # (batch_size * l, 1, t)
         out = self.softplus(y)            # (batch_size * l, 1, t)
         out = out.view(batch_size, l, t)  #(batch_size, l, t)
         # print(f"Ah out: {out.shape}")
         return out   
-    
-    
-class RALMU_block(nn.Module):
+   
+   
+class NALMU_block(nn.Module):
     """
-    A single layer/iteration of the RALMU model
-    updating both W and H
+    A single layer/ iteration of the NALMU model
+    updating W and H
     """
-    def __init__(self, f, t, l, shared_aw=None, shared_ah=None):
+    def __init__(self, f, t, l=88, beta=1, eps=1e-6, shared_w=None, shared_h=None):
         super().__init__()
-        if shared_aw is not None:
-            self.Aw = shared_aw
+        
+        self.eps    = eps
+        self.beta   = beta
+        
+        if shared_w is not None:
+            self.w_accel = shared_w
         else:
-            self.Aw = Aw(w_size=f*l)
-        if shared_ah is not None:
-            self.Ah = shared_ah
+            self.w_accel = nn.Parameter(torch.rand(f, l) + self.eps)
+        if shared_h is not None:
+            self.h_accel = shared_h
         else:
-            self.Ah = Ah(h_size=l*t)
-            
+            self.h_accel = nn.Parameter(torch.rand(l, t) + self.eps)
+    
     def forward(self, M, W, H):
-        eps = 1e-4
         
-        # Update W W_l+1 = W_l * Aw(W_l) * M.W_l^T/ W_l.H_l.H_l^T
-        Aw_out  = self.Aw(W)
-        numer_W = M @ H.transpose(-1, -2)
-        denom_W = W @ (H @ H.transpose(-1, -2)) + eps
-        W_new   = W * Aw_out * (numer_W / denom_W)
+        # Add channel dimension
+        W = W.unsqueeze(0)  # Shape: (1, f, l)
+        H = H.unsqueeze(0)  # Shape: (1, l, t)
         
+        wh = W @ H + self.eps
 
-        # Update H H_l+1 = H_l * Ah(H_l) * W_l+1^T.M/ W_l+1^T.W_l+1.H_l
-        Ah_out  = self.Ah(H)
-        numer_H = W_new.transpose(-1, -2) @ M
-        denom_H = (W_new.transpose(-1, -2) @ W_new) @ H + eps
-        
-        H_new   = H * Ah_out * (numer_H / denom_H)
+        # Compute WH^(β - 2) * V
+        wh_2 = wh.pow(self.beta - 2)
+        wh_2_m = wh_2 * M
 
-        return W_new, H_new
+        # Compute WH^(β - 1)
+        wh_1 = wh.pow(self.beta - 1)
+
+        # MU for W
+        numerator_W = wh_2_m @ H.transpose(-1, -2)
+        denominator_W = wh_1 @ H.transpose(-1, -2) + self.eps
+        update_W = numerator_W / denominator_W
+
+        # Apply learned transformation (Aw)
+        # Avoid going to zero by clamping
+        W_new = W * self.w_accel * update_W
+        W_new = torch.clamp(W_new, min=self.eps)
+
+        # Compute WH again with updated W
+        wh = W_new @ H + self.eps
+
+        wh_2 = wh.pow(self.beta - 2)
+        wh_2_m = wh_2 * M
+        wh_1 = wh.pow(self.beta - 1)
+
+        # MU for H
+        numerator_H = W_new.transpose(-1, -2) @ wh_2_m
+        denominator_H = W_new.transpose(-1, -2) @ wh_1 + self.eps
+        update_H = numerator_H / denominator_H
+
+        # Apply learned transformation (Ah)
+        # Avoid going to zero by clamping
+        H_new = H * self.h_accel * update_H
+        H_new = torch.clamp(H_new, min=self.eps)
+
+        return W_new.squeeze(0), H_new.squeeze(0)
+    
+
+class NALMU(nn.Module) :
+    """
+    Unrolled NALMU model
+    """ 
+    def __init__(self, t, l=88, W_path=None, n_bins=288, bins_per_octave=36, eps=1e-6, n_iter=10, n_init_steps=100, shared=False):
+        super().__init__()
+        
+        self.t                  = t
+        self.l                  = l
+        self.W_path             = W_path
+        self.n_bins             = n_bins
+        self.bins_per_octave    = bins_per_octave
+        self.eps                = eps
+        self.n_iter             = n_iter
+        self.n_init_steps       = n_init_steps
+        self.shared             = shared
+        
+        shared_w = nn.Parameter(torch.rand(self.n_bins, self.l) + self.eps) if self.shared else None
+        shared_h = nn.Parameter(torch.rand(self.l, self.t) + self.eps) if self.shared else None
+        
+        self.layers = nn.ModuleList([
+            NALMU_block(self.n_bins, self.t, self.l, self.eps, shared_w, shared_h)
+            for _ in range(self.n_iter)
+        ])
+        
+        W0, freqs, sr, true_freqs = init.init_W(self.W_path, verbose=self.verbose)
+        self.freqs = freqs
+        self.register_buffer("W0", W0)
+            
+    def init_H(self, M):
+        if len(M.shape) == 3:
+            # Batched input (training phase)
+            _, f, t = M.shape
+        elif len(M.shape) == 2:
+            # Non-batched input (inference phase)
+            f, t = M.shape
+            
+        H0 = init.init_H(self.l, t, self.W0, M, n_init_steps=self.n_init_steps, beta=self.beta)
+
+        self.register_buffer("H0", H0)
+    
+    def forward(self, M):
+        
+        assert hasattr(self, 'W0') or hasattr(self, 'H0'), "Please run init_H, W0 or H0 are not initialized"
+        
+        W = self.W0
+        H = self.H0
+
+        for i, layer in enumerate(self.layers):
+            W, H = layer(M, W, H)
+            if W is None or H is None:
+                print("W or H got to None")
+
+        M_hat = W @ H
+
+        return W, H, M_hat
         
         
-class RALMU_block2(nn.Module):
+class RALMU_block(nn.Module):
     """
     A single layer/iteration of the RALMU model
     with β-divergence multiplicative updates for W and H.
     Aw and Ah are CNNS
     """
-    def __init__(self, beta=1, shared_aw=None, shared_ah=None, learnable_beta=False):
+    def __init__(self, beta=1, shared_aw=None, shared_ah=None, use_ah=True, learnable_beta=False):
         super().__init__()
         
+        self.use_ah = use_ah
         self.Aw = shared_aw if shared_aw is not None else Aw_cnn()
-        self.Ah = shared_ah if shared_ah is not None else Ah_cnn()
+        if self.use_ah:
+            self.Ah = shared_ah if shared_ah is not None else Ah_cnn()
+            
         if learnable_beta:
             self.beta = nn.Parameter(torch.tensor(beta)) 
         else:
@@ -197,9 +299,9 @@ class RALMU_block2(nn.Module):
         
         wh = W @ H + self.eps
 
-        # Compute WH^(β - 2) * V
-        wh_pow = wh.pow(self.beta - 2)
-        wh_2_m = wh_pow * M
+        # Compute WH^(β - 2) * M
+        wh_2 = wh.pow(self.beta - 2)
+        wh_2_m = wh_2 * M
 
         # Compute WH^(β - 1)
         wh_1 = wh.pow(self.beta - 1)
@@ -209,7 +311,7 @@ class RALMU_block2(nn.Module):
         denominator_W = wh_1 @ H.transpose(-1, -2) + self.eps
         update_W = numerator_W / denominator_W
 
-        # Apply learned transformation (Aw), element-wise multiplication
+        # Apply learned transformation (Aw)
         # Avoid going to zero by clamping
         W_new = W * self.Aw(W) * update_W
         W_new = torch.clamp(W_new, min=self.eps)
@@ -217,8 +319,8 @@ class RALMU_block2(nn.Module):
         # Compute WH again with updated W
         wh = W_new @ H + self.eps
 
-        wh_pow = wh.pow(self.beta - 2)
-        wh_2_m = wh_pow * M
+        wh_2 = wh.pow(self.beta - 2)
+        wh_2_m = wh_2 * M
         wh_1 = wh.pow(self.beta - 1)
 
         # MU for H
@@ -226,71 +328,25 @@ class RALMU_block2(nn.Module):
         denominator_H = W_new.transpose(-1, -2) @ wh_1 + self.eps
         update_H = numerator_H / denominator_H
 
-        # Apply learned transformation (Ah), element-wise multiplication
+        # Apply learned transformation (Ah)
         # Avoid going to zero by clamping
-        H_new = H * self.Ah(H) * update_H
+        if self.use_ah:
+            H_new = H * self.Ah(H) * update_H
+        else:
+            H_new = H * update_H
         H_new = torch.clamp(H_new, min=self.eps)
 
         return W_new.squeeze(0), H_new.squeeze(0)
 
-
+    
 class RALMU(nn.Module):
     
-    def __init__(self, f, t, l=88, eps=1e-5, W=None, H=None, n_iter=10, shared=False):
+    def __init__(self, l=88, eps=1e-6, beta=1, W_path=None, n_iter=10, n_init_steps=100, hidden=32, use_ah=True, shared=False, verbose=False):
         super().__init__()
-        self.f = f
-        self.t = t
-        self.l = l
-        self.eps = eps
-        self.n_iter = n_iter
-        self.shared = shared
-
-        # Optional shared MLPs
-        shared_aw = Aw_cnn() if shared else None
-        shared_ah = Ah_cnn() if shared else None
-
-        # Unrolling layers
-        self.layers = nn.ModuleList([
-            RALMU_block2(shared_aw=shared_aw, shared_ah=shared_ah)
-            for _ in range(n_iter)
-        ])
         
-        if W is not None and H is not None:
-            self.W0 = self.register_buffer("W0", W.clone())
-            self.H0 = self.register_buffer("H0", H.clone())
-            print("copied W and H")
-        else:
-            W0 = torch.rand(f, l) + self.eps
-            H0 = torch.rand(l, t) + self.eps
-            self.register_buffer("W0", W0)
-            self.register_buffer("H0", H0)
-            print("initialized W and H")
-
-    def forward(self, M):
-        W = self.W0
-        H = self.H0
-
-        for layer in self.layers:
-            W, H = layer(M, W, H)
-            
-            #     if torch.isnan(W).any() or torch.isinf(W).any():
-            #         print("NaNs or Infs detected in W!")
-            #     if torch.isnan(H).any() or torch.isinf(H).any():
-            #         print("NaNs or Infs detected in H!")
-
-            
-            # W = torch.nan_to_num(W, nan=1e-6)
-            # H = torch.nan_to_num(H, nan=1e-6)
-
-        M_hat = W @ H
-
-        return W, H, M_hat
-    
-    
-class RALMU2(nn.Module):
-    
-    def __init__(self, l=88, eps=1e-5, beta=2, W_path=None, n_iter=10, n_init_steps=100, shared=False,):
-        super().__init__()
+        n_bins          = 288
+        bins_per_octave = 36
+        
         self.l      = l
         self.eps    = eps
         self.beta   = beta
@@ -298,20 +354,25 @@ class RALMU2(nn.Module):
         self.n_iter         = n_iter
         self.n_init_steps   = n_init_steps
         self.shared         = shared
+        self.verbose        = verbose
 
-        shared_aw = Aw_cnn() if shared else None
-        shared_ah = Ah_cnn() if shared else None
+        shared_aw = Aw_cnn(hidden_channels=hidden) if self.shared else None
+        if use_ah:
+            shared_ah = Ah_cnn(hidden_channels=hidden) if self.shared else None
+        else:
+            shared_ah = None
 
         # Unrolling layers
         self.layers = nn.ModuleList([
-            RALMU_block2(shared_aw=shared_aw, shared_ah=shared_ah)
-            for _ in range(n_iter)
+            RALMU_block(shared_aw=shared_aw, shared_ah=shared_ah, use_ah=use_ah)
+            for _ in range(self.n_iter)
         ])
         
-        self.W_cache = {}
-        self.H_cache = {}
+        W0, freqs, sr, true_freqs = init.init_W(self.W_path, verbose=self.verbose)
+        self.freqs = freqs
+        self.register_buffer("W0", W0)
             
-    def init_WH(self, M):
+    def init_H(self, M):
         if len(M.shape) == 3:
             # Batched input (training phase)
             _, f, t = M.shape
@@ -319,38 +380,10 @@ class RALMU2(nn.Module):
             # Non-batched input (inference phase)
             f, t = M.shape
             
-        shape_key = (f, t)
+        H0 = init.init_H(self.l, t, self.W0, M, n_init_steps=self.n_init_steps, beta=self.beta) 
 
-        # Check if we've already initialized W and H for this shape (f,t)
-        if shape_key in self.W_cache:
-            W0 = self.W_cache[shape_key]
-            H0 = self.H_cache[shape_key]
-            print(f"Retrieved cached W and H")
-        else:
-            if self.W_path is not None:
-                start = time.time()
-                W0, freqs, sr, freqs_true = init.init_W(self.W_path)
-                w_time = time.time()
-                H0 = init.init_H(self.l, t, W0, M, n_init_steps=self.n_init_steps, beta=self.beta)
-                h_time = time.time()
-                print(f"W init length: {w_time - start}, H init length: {h_time - w_time}")
-                if H0.dim() == 3:
-                    H0 = H0.squeeze(0)
-                self.freqs = freqs_true
-                print("Initialized W and H from files")
-            else:
-                W0 = torch.rand(f, self.l) + self.eps
-                H0 = torch.rand(self.l, t) + self.eps
-                print("Initialized random W and H")
-
-            # Store in cache
-            self.W_cache[shape_key] = W0
-            self.H_cache[shape_key] = H0
-            print(f"Cached W and H")
-
-        self.register_buffer("W0", W0)
         self.register_buffer("H0", H0)
-
+    
     def forward(self, M):
         
         assert hasattr(self, 'W0') or hasattr(self, 'H0'), "Please run init_WH, W0 or H0 are not initialized"
@@ -358,11 +391,20 @@ class RALMU2(nn.Module):
         W = self.W0
         H = self.H0
 
+        W_layers = []
+        H_layers = []
+
         for i, layer in enumerate(self.layers):
             W, H = layer(M, W, H)
+            W_layers.append(W)
+            H_layers.append(H)
             if W is None or H is None:
                 print("W or H got to None")
 
-        M_hat = W @ H
+        M_hats = [W @ H for W, H in zip(W_layers, H_layers)]
 
-        return W, H, M_hat
+        return W_layers, H_layers, M_hats
+    
+    def update_WH(self, W_new, H_new):
+        self.W0 = W_new
+        self.H0 = H_new

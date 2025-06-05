@@ -1,9 +1,12 @@
+import nnAudio.Spectrogram
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
 import pretty_midi
 import torchaudio.transforms as T
+import torch.nn.functional as F
 import librosa
+import nnAudio
 from scipy.interpolate import interp1d
 
 """
@@ -50,7 +53,7 @@ def vis_spectrogram(spec, times, frequencies, start, stop, min_freq, max_freq):
     plt.figure(figsize=(10, 5))
     plt.imshow(spec_slice, origin='lower', aspect='auto',
                 extent=[time_slice[0], time_slice[-1],
-                       freq_slice[0]/1000, freq_slice[-1]/1000])
+                       freq_slice[0]/1000, freq_slice[-1]/1000], cmap='magma')
     plt.title("Spectrogram (dB)")
     plt.xlabel("Time (s)")
     plt.ylabel("Frequency (kHz)")
@@ -61,15 +64,16 @@ def vis_spectrogram(spec, times, frequencies, start, stop, min_freq, max_freq):
 """
 CQT Spectrogram
 """
-def cqt_spec(signal, sample_rate, hop_length, fmin=librosa.note_to_hz('A0'), bins_per_octave=36, n_bins=288, top_db=60):
+def cqt_spec(signal, sample_rate, hop_length, fmin=librosa.note_to_hz('A0'), bins_per_octave=36, n_bins=288):
     """
     Computes the CQT spectrogram
     """
     signal  = signal.squeeze().numpy()
     if signal.shape[0] > 1: # Convert to mono if stereo
         signal = np.mean(signal, axis=0)
-    cqt     = librosa.cqt(y=signal, sr=sample_rate, hop_length=hop_length, fmin=fmin, n_bins=n_bins, bins_per_octave=bins_per_octave)
-    
+    cqt = librosa.cqt(y=signal, sr=sample_rate, hop_length=hop_length, fmin=fmin, n_bins=n_bins, bins_per_octave=bins_per_octave)
+    cqt = np.apply_along_axis(lambda x: x / np.sum(np.abs(x)), axis=0, arr=cqt)
+
     # Convert magnitude to decibels
     spec = np.abs(cqt)
     # spec = librosa.amplitude_to_db(np.abs(cqt), top_db=top_db)
@@ -94,7 +98,7 @@ def max_columns(W):
 
     return W_max
 
-def vis_cqt_spectrogram(spec, times, frequencies, start, stop, set_note_label=False):
+def vis_cqt_spectrogram(spec, times, frequencies, start, stop, set_note_label=False, add_C8=False):
     start_idx       = np.searchsorted(times, start)
     stop_idx        = np.searchsorted(times, stop)
 
@@ -114,9 +118,12 @@ def vis_cqt_spectrogram(spec, times, frequencies, start, stop, set_note_label=Fa
     plt.figure(figsize=(12, 6))
     plt.imshow(spec_slice, origin='lower', aspect='auto',
                extent=[time_slice[0], time_slice[-1],
-                       0, len(frequencies)])
+                       0, len(frequencies)], cmap='magma')
+    if add_C8:
+        plt.plot(np.arange(time_slice[-1]), [261]*time_slice[-1], color='g', label='4186Hz (C8)')
+        plt.legend()
 
-    plt.title("CQT Spectrogram (dB)")
+    plt.title("CQT Spectrogram")
     plt.xlabel("Time (s)")
     plt.ylabel("Notes" if set_note_label else "Frequency")
 

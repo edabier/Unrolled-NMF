@@ -6,59 +6,114 @@ import torchaudio
 from torch.utils.data import Dataset
 import librosa
 import numpy as np
+import matplotlib.pyplot as plt
 import glob, os
 import src.spectrograms as spec
 import src.init as init
 
+def model_infos(model, names=False):
+    """
+    Displays the number of parameters of the model
+    and the names of the layers if names is set to True
+    """
+    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    if names:
+        for name, param in model.named_parameters():
+            print(f"Layer: {name} | Size: {param.size()}")
+    print(f"The model has {total_params} parameters")
+
 class MaestroNMFDataset(Dataset):
     
     def __init__(self, audio_dir, midi_dir,hop_length=128):
+        assert os.path.isdir(audio_dir) or os.path.isdir(midi_dir), f"The directory '{audio_dir} or {midi_dir}' does not exist"
         self.audio_files    = sorted(glob.glob(os.path.join(audio_dir, '*.wav')))
         self.midi_dir       = midi_dir
         self.hop_length     = hop_length
+        self.min_length = self._determine_min_length()
 
     def __len__(self):
-        return len(self.audio_files)
+        total_length = 0
+        for audio_path in self.audio_files:
+            waveform, sr = torchaudio.load(audio_path)
+            _, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length)
+            length = times_cqt.shape[0]
+            total_length += length // self.min_length
+        return total_length
+
+    def _determine_min_length(self):
+        min_length = float('inf')
+        for audio_path in self.audio_files:
+            waveform, sr = torchaudio.load(audio_path)
+            _, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length)
+            length = times_cqt.shape[0]
+            if length < min_length:
+                min_length = length
+        return min_length
 
     def __getitem__(self, idx):
-        audio_path  = self.audio_files[idx]
-        filename    = os.path.basename(audio_path).replace(".wav", ".mid")
-        midi_path   = os.path.join(self.midi_dir, filename)
+        current_idx = 0
+        for audio_path in self.audio_files:
+            waveform, sr = torchaudio.load(audio_path)
+            spec_db, times_cqt, freq_cqt = spec.cqt_spec(waveform, sr, self.hop_length)
+            midi, times_midi = spec.midi_to_pianoroll(
+                os.path.join(self.midi_dir, os.path.basename(audio_path).replace(".wav", ".mid")),
+                waveform, times_cqt, self.hop_length, sr
+            )
 
-        # print(f"Loading audio file: {audio_path}")
-        # print(f"Loading MIDI file: {midi_path}")
+            length = times_cqt.shape[0]
+            num_segments = length // self.min_length
 
-        waveform, sr = torchaudio.load(audio_path)
+            if idx < current_idx + num_segments:
+                segment_idx = idx - current_idx
+                start_idx = segment_idx * self.min_length
+                end_idx = start_idx + self.min_length
 
-        spec_db, times_cqt, freq_cqt = spec.cqt_spec(waveform, sr, self.hop_length)
-        midi, times_midi = spec.midi_to_pianoroll(midi_path, waveform, times_cqt, self.hop_length, sr)
-        return spec_db, midi
+                spec_db_segment = spec_db[:, start_idx:end_idx]
+                midi_segment = midi[:, start_idx:end_idx]
+
+                return spec_db_segment, midi_segment
+
+            current_idx += num_segments
+
+        raise IndexError("Index out of range")
 
 """
 Loss (no  batch_size)
 """
-def gaussian_kernel(kernel_size=3, sigma=2):
+def gaussian_kernel(kernel_size=3, sigma=2, is_2d=False):
     """
-    Creates a 1D Gaussian kernel.
+    Creates a 1D or 2D Gaussian kernel.
     """
-    kernel = np.exp(-np.linspace(-kernel_size / 2, kernel_size / 2, kernel_size)**2 / (2 * sigma**2))
-    kernel = kernel / kernel.sum()
-    return torch.tensor(kernel, dtype=torch.float32).unsqueeze(0).unsqueeze(0).unsqueeze(-1)
+    if is_2d:
+        ax = np.linspace(-(kernel_size // 2), kernel_size // 2, kernel_size)
+        xx, yy = np.meshgrid(ax, ax)
+        kernel = np.exp(-(xx**2 + yy**2) / (2 * sigma**2))
+        kernel = kernel / kernel.sum()
+        kernel = torch.tensor(kernel, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+    else:    
+        kernel = np.exp(-np.linspace(-kernel_size / 2, kernel_size / 2, kernel_size)**2 / (2 * sigma**2))
+        kernel = kernel / kernel.sum()
+        kernel = torch.tensor(kernel, dtype=torch.float32).unsqueeze(0).unsqueeze(0).unsqueeze(-1)
+    return kernel
 
-def filter1d_tensor(tensor, kernel, axis=0):
+def filter1d_tensor(tensor, kernel, axis=0, is_2d=False):
     """
-    Applies a 1D Gaussian filter to a 2D tensor along a specified axis.
+    Applies a 1D or 2D Gaussian filter to a 2D tensor along a specified axis.
     """
-    if axis == 0:
-        # Apply the kernel to each column
-        tensor = tensor.T.unsqueeze(0).unsqueeze(0)
-        filtered_tensor = F.conv2d(tensor, kernel, padding=(kernel.size(-2) // 2, 0)).squeeze(0).squeeze(0).T
-    elif axis == 1:
-        # Apply the kernel to each row
+    if is_2d:
         tensor = tensor.unsqueeze(0).unsqueeze(0)
-        filtered_tensor = F.conv2d(tensor, kernel, padding=(kernel.size(-2) // 2, 0)).squeeze(0).squeeze(0)
+        filtered_tensor = F.conv2d(tensor, kernel, padding=kernel.size(-1) // 2).squeeze(0).squeeze(0)
     else:
-        raise ValueError("Axis must be 0 or 1")
+        if axis == 0:
+            # Apply the kernel to each column
+            tensor = tensor.T.unsqueeze(0).unsqueeze(0)
+            filtered_tensor = F.conv2d(tensor, kernel, padding=(kernel.size(-2) // 2, 0)).squeeze(0).squeeze(0).T
+        elif axis == 1:
+            # Apply the kernel to each row
+            tensor = tensor.unsqueeze(0).unsqueeze(0)
+            filtered_tensor = F.conv2d(tensor, kernel, padding=(kernel.size(-2) // 2, 0)).squeeze(0).squeeze(0)
+        else:
+            raise ValueError("Axis must be 0 or 1")
 
     return filtered_tensor
 
@@ -414,6 +469,25 @@ def train(n_epochs, model, optimizer, loader, device, criterion):
         print(f"============= Epoch {epoch+1}, Loss: {np.mean(inter_loss)} =============")
     
     return losses#, monitor_reconstruct, monitor_sparsity
+
+def warmup_train(model, n_epochs, loader, optimizer, device):
+    losses = []
+    for i in range(n_epochs):
+        inter_loss = []
+        for M, midi_batch in loader:
+            model.init_H(M.squeeze(0))
+            M = M.to(device)
+            W_layers, H_layers, M_hats = model(M)
+            loss = torch.norm(model.W0 - W_layers[-1]) + torch.norm(model.H0 - H_layers[-1])
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            inter_loss.append(loss.detach().numpy())
+        losses.append(np.mean(inter_loss))
+        print(f"------- epoch {i}, loss = {losses[i]} ----------")
+    plt.plot(losses, label='Reconstruction of W + H loss over epochs')
+    plt.xlabel('epochs')
+    plt.show()
 
 def transribe(model, M, device):
     model.eval()

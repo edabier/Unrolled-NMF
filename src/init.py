@@ -5,6 +5,7 @@ import os
 import librosa
 import numpy as np
 import soundfile as sf
+from scipy.optimize import linear_sum_assignment
 import src.spectrograms as spec
   
 """
@@ -16,72 +17,91 @@ def first_non_zero(f0):
     non_zero    = torch.argmax(f0_2, 0, keepdim=True)
     return non_zero
 
-def init_W(folder_path, hop_length=128, bins_per_octave=36, n_bins=288, avg_size=10):
+def init_W(folder_path=None, hop_length=128, bins_per_octave=36, n_bins=288, verbose=False):
     """
     Create a W matrix from all audio files contained in the input path
     By taking the column of highest energy of the CQT
     """
-    templates = []
-    freqs     = []
-    freqs_true = []
-    file_list = sorted([f for f in os.listdir(folder_path) if f.lower().endswith(('.wav'))]) #or f.lower().endswith(('1.wav'))])
+    if folder_path is not None:
+        templates = []
+        true_freqs     = []
+        file_list = sorted([f for f in os.listdir(folder_path) if f.lower().endswith(('.wav'))]) #or f.lower().endswith(('1.wav'))])
+        
+        note_to_midi = {
+            'C': 0, 'C#': 1,'D': 2, 'D#': 3, 
+            'E': 4, 'F': 5, 'F#': 6, 'G': 7, 
+            'G#': 8, 'A': 9, 'A#': 10, 'B': 11
+        }
+
+        for fname in file_list:
+            path = os.path.join(folder_path, fname)
+            y, sr = torchaudio.load(path)
+            
+            duration = y.shape[1] / sr
+            min_duration = (n_bins * hop_length) / sr
+            assert duration >= min_duration, f"Audio file {fname} is too short. Duration: {duration:.2f}s, Required: {min_duration:.2f}s"
+            
+            spec_cqt, _, freq = spec.cqt_spec(y, sample_rate=sr, hop_length=hop_length,
+                                    bins_per_octave=bins_per_octave, n_bins=n_bins)
+            
+            # spec_stft = torch.tensor(np.abs(librosa.stft(y.numpy(), n_fft=n_fft, hop_length=hop_length))[0,:,:])
+            
+            if len(fname) == 7:
+                note, octave = fname[0:2], int(fname[2])
+            else:
+                note, octave = fname[0], int(fname[1])
+            midi_note = note_to_midi[note] + (octave + 2) * 12  - 12 # MIDI note number
+            expected_freq = midi_to_hz(torch.tensor(midi_note, dtype=torch.float32))
+            true_freqs.append(expected_freq)
+            
+            # f0 = torchyin.estimate(y, sample_rate=sr, pitch_min=20, pitch_max=5000)
+            # funda = first_non_zero(f0[0])
+            # print(f"note: {fname},  pitch: {f0[0,funda]}, true: {expected_freq}")
+            # freqs.append(f0[0, funda])
+            
+            # Choose frame with max energy (sum across frequencies)
+            energy_per_frame = spec_cqt.sum(axis=0)
+            best_frame_idx = torch.argmax(energy_per_frame)
+            template = spec_cqt[:,best_frame_idx]
+            # _, top_indices = torch.topk(energy_per_frame, avg_size)
+            # selected_frames = spec_cqt[:, top_indices]
+            # template = selected_frames
+            # template = torch.mean(selected_frames, dim=1)
+            
+            # # Select the column with the highest harmonic sum
+            # harmonic_sum = torch.zeros(spec_cqt.shape[0])
+            # for i in range(spec_cqt.shape[0]):
+            #     harmonic_indices = torch.arange(i, spec_cqt.shape[0], i + 1)  # Indices of harmonics
+            #     harmonic_sum[i] = torch.sum(spec_cqt[harmonic_indices, :])
+
+            # max_energy_index = torch.argmax(harmonic_sum)
+            # template = spec_cqt[:, max_energy_index]
+
+            templates.append(template)
+
+        sorted_indices = sorted(range(len(true_freqs)), key=lambda k: true_freqs[k])
+        templates = [templates[i] for i in sorted_indices]
+        freqs = [true_freqs[i] for i in sorted_indices]
+        
+        # W of shape f * (88*n)
+        W = torch.stack(templates, axis=1)
+        # W = torch.cat(templates, dim=1)
+        
+        if verbose:
+            print("Initialized W for the model from files")
     
-    note_to_midi = {
-        'C': 0, 'C#': 1,'D': 2, 'D#': 3, 
-        'E': 4, 'F': 5, 'F#': 6, 'G': 7, 
-        'G#': 8, 'A': 9, 'A#': 10, 'B': 11
-    }
-
-    for fname in file_list:
-        path = os.path.join(folder_path, fname)
-        y, sr = torchaudio.load(path)
-        
-        duration = y.shape[1] / sr
-        min_duration = (n_bins * hop_length) / sr
-        assert duration >= min_duration, f"Audio file {fname} is too short. Duration: {duration:.2f}s, Required: {min_duration:.2f}s"
-        
-        spec_cqt, _, freq = spec.cqt_spec(y, sample_rate=sr, hop_length=hop_length,
-                                 bins_per_octave=bins_per_octave, n_bins=n_bins)
-        
-        spec_stft = torch.tensor(np.abs(librosa.stft(y.numpy(), hop_length=512))[0,:,:])
-        
-        if len(fname) == 7:
-            note, octave = fname[0:2], int(fname[2])
-        else:
-            note, octave = fname[0], int(fname[1])
-        midi_note = note_to_midi[note] + (octave + 2) * 12  - 12 # MIDI note number
-        expected_freq = midi_to_hz(torch.tensor(midi_note, dtype=torch.float32))
-        freqs_true.append(expected_freq)
-        
-        # f0 = torchyin.estimate(y, sample_rate=sr, pitch_min=20, pitch_max=5000)
-        # funda = first_non_zero(f0[0])
-        # print(f"note: {fname},  pitch: {f0[0,funda]}, true: {expected_freq}")
-        # freqs.append(f0[0, funda])
-        
-        # # Choose frame with max energy (sum across frequencies)
-        energy_per_frame = spec_cqt.sum(axis=0)
-        _, top_indices = torch.topk(energy_per_frame, avg_size)
-        selected_frames = spec_cqt[:, top_indices]
-        template = torch.mean(selected_frames, dim=1)
-
-        # # Convert from dB to linear for multiplication use
-        # template_lin = librosa.db_to_amplitude(template)
-
-        # # Normalize
-        # template_lin /= np.linalg.norm(template_lin) + 1e-8
-        # templates.append(template_lin)
-        # template = spec_cqt[:, 0]
-        templates.append(template)
-
-    sorted_indices = sorted(range(len(freqs_true)), key=lambda k: freqs_true[k])
-    templates = [templates[i] for i in sorted_indices]
-    # freqs = [freqs[i] for i in sorted_indices]
-    freqs_true = [freqs_true[i] for i in sorted_indices]
-    
-    # W of shape f * (88*n)
-    W = torch.stack(templates, axis=1)
-    
-    return W, freqs, sr, freqs_true
+        return W, freq, sr, true_freqs
+    else:
+        freqs = librosa.cqt_frequencies(n_bins=n_bins, fmin=librosa.note_to_hz("A0"), bins_per_octave=bins_per_octave)
+        midi_notes = range(21, 109)
+        note_frequencies = librosa.midi_to_hz(midi_notes)
+        bin_indices = np.searchsorted(freqs, note_frequencies)
+        W = torch.zeros((n_bins, len(midi_notes)))
+        for col, bin_idx in enumerate(bin_indices):
+            W[bin_idx, col] = 1
+        sr = None
+        print("Initialized W with synthetic data")
+        return W, freqs, sr
 
 def init_H(l, t, W, M, n_init_steps, beta=1):
     eps = 1e-8
@@ -90,11 +110,13 @@ def init_H(l, t, W, M, n_init_steps, beta=1):
     # create H with n iterations of MU
     for i in range(n_init_steps):
         Wh = W @ H
+        Wh = torch.clamp(Wh, min=eps)
         Wh_beta_minus_2 = Wh ** (beta - 2)
         Wh_beta_minus_1 = Wh ** (beta - 1)
 
         numerator = W.T @ (Wh_beta_minus_2 * M)
         denominator = W.T @ Wh_beta_minus_1 + eps
+        denominator = torch.clamp(denominator, min=eps)
 
         H = H * (numerator / denominator)
     
@@ -129,31 +151,64 @@ def frequency_to_note(frequency, thresh):
     else:
         return torch.tensor(0, dtype=torch.float32)
 
-def W_to_pitch(W, freqs, thresh=0.4, funda_thresh=0.1, H=None):
+def W2pitch(W_new, W_init, notes):
+    
+    cost_matrix = torch.zeros((W_init.shape[1], W_new.shape[1]))
+    for i in range(W_init.shape[1]):
+        for j in range(W_new.shape[1]):
+            # Use Euclidean distance as the cost metric
+            cost_matrix[i, j] = torch.norm(W_init[:, i] - W_new[:, j])
+            
+    cost_matrix_np = cost_matrix.numpy()
+    row_ind, col_ind = linear_sum_assignment(cost_matrix_np)
+    # W_new_rearranged = W_new[:, col_ind]
+    notes_new = [notes[i] for i in col_ind]
+    return notes_new
+
+def W_to_pitch(W, true_freqs, thresh=0.4, H=None, use_max=False, sort=False):
     """
     Assign a pitch to every column of W.
     freqs being the frequency correspondence of every column's sample.
     """
-    
+    true_freqs.sort()    
     frequencies = torch.empty(W.shape[1], dtype=torch.float32)
     notes = torch.empty(W.shape[1])
+    freq_range = librosa.cqt_frequencies(W.shape[0], fmin=librosa.note_to_hz('A0'), bins_per_octave=36)
     
     for i in range(W.shape[1]):
-        # reconstructed_audio = librosa.griffinlim(W[:,i], hop_length=512, n_iter=32)[0]
-        # funda, _, _ = librosa.pyin(reconstructed_audio, sr=librosa.get_samplerate(reconstructed_audio), fmin=librosa.note_to_hz('A0'), fmax=librosa.note_to_hz('C8'))
-        pitch = freqs[i]  # Use the known frequency for the note
-        frequencies[i] = pitch #funda
-        notes[i] = frequency_to_note(pitch, thresh) - 21
+        if use_max:
+            _, max_id = torch.max(W[:,i], dim=0)
+            freq = freq_range[max_id] # Use freq with max amplitude in the CQT
+        else:
+            freq = true_freqs[i]  # Use the known frequency for the note
+        
+        if freq >= 27.5 and freq < 4187:
+            if sort:
+                note_true = frequency_to_note(true_freqs[i], thresh) - 21
+                note = frequency_to_note(freq, thresh) - 21
+                if torch.abs(note - note_true) == 12:
+                    frequencies[i] = true_freqs[i]
+                    notes[i] = note_true
+                else:    
+                    frequencies[i] = freq
+                    notes[i] = note
+            else:
+                frequencies[i] = freq
+                notes[i] = frequency_to_note(freq, thresh) - 21
 
-    sorted_indices = torch.argsort(frequencies)
-    sorted_frequencies = frequencies[sorted_indices]
-    sorted_notes = notes[sorted_indices]
-    sorted_W = W[:, sorted_indices]
-    if H is not None:
-        sorted_H = H[sorted_indices, :]
-        return sorted_frequencies, sorted_notes, sorted_W, sorted_H
+    if sort:
+        sorted_indices = torch.argsort(frequencies)
+        sorted_frequencies = frequencies[sorted_indices]
+        sorted_notes = notes[sorted_indices]
+        sorted_W = W[:, sorted_indices]
+        
+        if H is not None:
+            sorted_H = H[sorted_indices, :]
+            return sorted_frequencies, sorted_notes, sorted_W, sorted_H
+        else:
+            return sorted_frequencies, sorted_notes, sorted_W
     else:
-        return sorted_frequencies, sorted_notes, sorted_W
+        return frequencies, notes
   
 def WH_to_MIDI(W, H, notes, threshold=0.02, smoothing_window=5, adaptative=False, normalize=True):
     """
@@ -208,8 +263,6 @@ def WH_to_MIDI(W, H, notes, threshold=0.02, smoothing_window=5, adaptative=False
             midi[midi_note, active_indices] = activation[active_indices]
     
     active_midi = [i for i in range(88) if (midi[i,:]>0).any().item()]
-    # scale_factor = 1 / midi.max()
-    # midi_scaled = midi * scale_factor
     
     return midi, active_midi
 
