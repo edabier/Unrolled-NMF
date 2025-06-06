@@ -470,7 +470,7 @@ def train(n_epochs, model, optimizer, loader, device, criterion):
     
     return losses#, monitor_reconstruct, monitor_sparsity
 
-def warmup_train(model, n_epochs, loader, optimizer, device):
+def warmup_train(model, n_epochs, loader, optimizer, device, print_grads=False):
     losses = []
     for i in range(n_epochs):
         inter_loss = []
@@ -481,10 +481,23 @@ def warmup_train(model, n_epochs, loader, optimizer, device):
             loss = torch.norm(model.W0 - W_layers[-1]) + torch.norm(model.H0 - H_layers[-1])
             optimizer.zero_grad()
             loss.backward()
+            
+            # for name, param in model.named_parameters():
+            #     if param.grad is not None and "w_accel" in name:
+            #         param.grad.data.mul_(10.0)  # Example scaling factor
+                    
             optimizer.step()
-            inter_loss.append(loss.detach().numpy())
+            inter_loss.append(loss.item())
+            
+            if print_grads:
+                for name, param in model.named_parameters():
+                    if param.grad is not None:
+                        print(f"Grad norm: {param.grad.norm().item()}")
+                    else:
+                        print(f"Grad is None for {name}")
+                print("====== New audio file ======")
         losses.append(np.mean(inter_loss))
-        print(f"------- epoch {i}, loss = {losses[i]} ----------")
+        print(f"------- epoch {i}, loss = {losses[i]:.3f} -------")
     plt.plot(losses, label='Reconstruction of W + H loss over epochs')
     plt.xlabel('epochs')
     plt.show()

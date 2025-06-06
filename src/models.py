@@ -153,21 +153,14 @@ class NALMU_block(nn.Module):
     A single layer/ iteration of the NALMU model
     updating W and H
     """
-    def __init__(self, f, t, l=88, beta=1, eps=1e-6, shared_w=None, shared_h=None):
+    def __init__(self, f, l=88, beta=1, eps=1e-6, shared_w=None, shared_h=None):
         super().__init__()
         
         self.eps    = eps
         self.beta   = beta
         
-        if shared_w is not None:
-            self.w_accel = shared_w
-        else:
-            self.w_accel = nn.Parameter(torch.rand(f, l) + self.eps)
-        if shared_h is not None:
-            self.h_accel = shared_h
-        else:
-            self.h_accel = nn.Parameter(torch.rand(l, t) + self.eps)
-    
+        self.w_accel = shared_w if shared_w is not None else nn.Parameter(torch.rand(f, l) + self.eps)
+
     def forward(self, M, W, H):
         
         # Add channel dimension
@@ -207,7 +200,7 @@ class NALMU_block(nn.Module):
 
         # Apply learned transformation (Ah)
         # Avoid going to zero by clamping
-        H_new = H * self.h_accel * update_H
+        H_new = H * update_H# H * self.h_accel * update_H
         H_new = torch.clamp(H_new, min=self.eps)
 
         return W_new.squeeze(0), H_new.squeeze(0)
@@ -217,24 +210,32 @@ class NALMU(nn.Module) :
     """
     Unrolled NALMU model
     """ 
-    def __init__(self, t, l=88, W_path=None, n_bins=288, bins_per_octave=36, eps=1e-6, n_iter=10, n_init_steps=100, shared=False):
+    def __init__(self, l=88, eps=1e-6, beta=1, n_iter=10, W_path=None, n_init_steps=10, shared=False, n_bins=288, bins_per_octave=36, learnable_beta=False, verbose=False):
         super().__init__()
         
-        self.t                  = t
-        self.l                  = l
-        self.W_path             = W_path
         self.n_bins             = n_bins
         self.bins_per_octave    = bins_per_octave
+        
+        self.l                  = l
+        self.eps                = eps
+        # self.beta               = beta
+        self.W_path             = W_path
         self.eps                = eps
         self.n_iter             = n_iter
         self.n_init_steps       = n_init_steps
         self.shared             = shared
+        self.verbose            = verbose
         
         shared_w = nn.Parameter(torch.rand(self.n_bins, self.l) + self.eps) if self.shared else None
-        shared_h = nn.Parameter(torch.rand(self.l, self.t) + self.eps) if self.shared else None
+        # shared_h = nn.Parameter(torch.rand(self.l, self.t) + self.eps) if self.shared else None
+            
+        if learnable_beta:
+            self.beta = nn.Parameter(torch.tensor(beta)) 
+        else:
+            self.register_buffer("beta", torch.tensor(beta))
         
         self.layers = nn.ModuleList([
-            NALMU_block(self.n_bins, self.t, self.l, self.eps, shared_w, shared_h)
+            NALMU_block(self.n_bins, self.l, self.beta, self.eps, shared_w)
             for _ in range(self.n_iter)
         ])
         
@@ -256,19 +257,24 @@ class NALMU(nn.Module) :
     
     def forward(self, M):
         
-        assert hasattr(self, 'W0') or hasattr(self, 'H0'), "Please run init_H, W0 or H0 are not initialized"
+        assert hasattr(self, 'H0'), "Please run init_H, H0 and layers are not initialized"
         
         W = self.W0
         H = self.H0
 
+        W_layers = []
+        H_layers = []
+
         for i, layer in enumerate(self.layers):
             W, H = layer(M, W, H)
+            W_layers.append(W)
+            H_layers.append(H)
             if W is None or H is None:
                 print("W or H got to None")
 
-        M_hat = W @ H
+        M_hats = [W @ H for W, H in zip(W_layers, H_layers)]
 
-        return W, H, M_hat
+        return W_layers, H_layers, M_hats
         
         
 class RALMU_block(nn.Module):
@@ -277,7 +283,7 @@ class RALMU_block(nn.Module):
     with β-divergence multiplicative updates for W and H.
     Aw and Ah are CNNS
     """
-    def __init__(self, beta=1, shared_aw=None, shared_ah=None, use_ah=True, learnable_beta=False):
+    def __init__(self, beta=1, eps=1e-6, shared_aw=None, shared_ah=None, use_ah=True, learnable_beta=False):
         super().__init__()
         
         self.use_ah = use_ah
@@ -289,7 +295,7 @@ class RALMU_block(nn.Module):
             self.beta = nn.Parameter(torch.tensor(beta)) 
         else:
             self.register_buffer("beta", torch.tensor(beta))
-        self.eps = 1e-6
+        self.eps = eps
 
     def forward(self, M, W, H):
         
@@ -341,16 +347,16 @@ class RALMU_block(nn.Module):
     
 class RALMU(nn.Module):
     
-    def __init__(self, l=88, eps=1e-6, beta=1, W_path=None, n_iter=10, n_init_steps=100, hidden=32, use_ah=True, shared=False, verbose=False):
+    def __init__(self, l=88, eps=1e-6, beta=1, W_path=None, n_iter=10, n_init_steps=100, hidden=32, use_ah=True, shared=False, n_bins=288, bins_per_octave=36, verbose=False):
         super().__init__()
         
-        n_bins          = 288
-        bins_per_octave = 36
+        self.n_bins          = n_bins
+        self.bins_per_octave = bins_per_octave
         
-        self.l      = l
-        self.eps    = eps
-        self.beta   = beta
-        self.W_path = W_path
+        self.l              = l
+        self.eps            = eps
+        self.beta           = beta
+        self.W_path         = W_path
         self.n_iter         = n_iter
         self.n_init_steps   = n_init_steps
         self.shared         = shared
@@ -364,7 +370,7 @@ class RALMU(nn.Module):
 
         # Unrolling layers
         self.layers = nn.ModuleList([
-            RALMU_block(shared_aw=shared_aw, shared_ah=shared_ah, use_ah=use_ah)
+            RALMU_block(eps=self.eps, shared_aw=shared_aw, shared_ah=shared_ah, use_ah=use_ah)
             for _ in range(self.n_iter)
         ])
         
