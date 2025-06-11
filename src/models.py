@@ -26,7 +26,34 @@ def MU_iter(M, l, f, t, n_iter):
     M_hat = W[-1] @ H[-1]
     
     return W, H, M_hat
+
+
+def MU(M, W, H, n_iter, beta=1, eps=1e-6):
     
+    for _ in range(n_iter):
+        Wh = W @ H
+        Wh = torch.clamp(Wh, min=eps)
+        Wh_beta_minus_2 = Wh ** (beta - 2)
+        Wh_beta_minus_1 = Wh ** (beta - 1)
+        
+        numerator = (Wh_beta_minus_2 * M) @ H.T
+        denominator = Wh_beta_minus_1 @ H.T + eps
+        denominator = torch.clamp(denominator, min=eps)
+        
+        W = W * (numerator/ denominator)
+        
+        Wh = W @ H
+        Wh = torch.clamp(Wh, min=eps)
+        Wh_beta_minus_2 = Wh ** (beta - 2)
+        Wh_beta_minus_1 = Wh ** (beta - 1)
+
+        numerator = W.T @ (Wh_beta_minus_2 * M)
+        denominator = W.T @ Wh_beta_minus_1 + eps
+        denominator = torch.clamp(denominator, min=eps)
+
+        H = H * (numerator / denominator)
+        
+    return W, H
 
 class Aw(nn.Module):
     """

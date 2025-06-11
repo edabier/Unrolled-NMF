@@ -98,7 +98,7 @@ def max_columns(W):
 
     return W_max
 
-def vis_cqt_spectrogram(spec, times, frequencies, start, stop, set_note_label=False, add_C8=False):
+def vis_cqt_spectrogram(spec, times, frequencies, start, stop, set_note_label=False, add_C8=False, cmap="magma"):
     start_idx       = np.searchsorted(times, start)
     stop_idx        = np.searchsorted(times, stop)
 
@@ -118,7 +118,7 @@ def vis_cqt_spectrogram(spec, times, frequencies, start, stop, set_note_label=Fa
     plt.figure(figsize=(12, 6))
     plt.imshow(spec_slice, origin='lower', aspect='auto',
                extent=[time_slice[0], time_slice[-1],
-                       0, len(frequencies)], cmap='magma')
+                       0, len(frequencies)], cmap=cmap)
     if add_C8:
         plt.plot(np.arange(time_slice[-1]), [261]*time_slice[-1], color='g', label='4186Hz (C8)')
         plt.legend()

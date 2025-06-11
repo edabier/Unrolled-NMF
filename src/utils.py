@@ -85,11 +85,11 @@ def gaussian_kernel(kernel_size=3, sigma=2, is_2d=False):
     Creates a 1D or 2D Gaussian kernel.
     """
     if is_2d:
-        ax = np.linspace(-(kernel_size // 2), kernel_size // 2, kernel_size)
-        xx, yy = np.meshgrid(ax, ax)
-        kernel = np.exp(-(xx**2 + yy**2) / (2 * sigma**2))
+        ax = torch.linspace(-(kernel_size // 2), kernel_size // 2, kernel_size)
+        xx, yy = torch.meshgrid(ax, ax)
+        kernel = torch.exp(-(xx**2 + yy**2) / (2 * sigma**2))
         kernel = kernel / kernel.sum()
-        kernel = torch.tensor(kernel, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+        kernel = kernel.unsqueeze(0).unsqueeze(0)
     else:    
         kernel = np.exp(-np.linspace(-kernel_size / 2, kernel_size / 2, kernel_size)**2 / (2 * sigma**2))
         kernel = kernel / kernel.sum()
@@ -126,6 +126,8 @@ def detect_onset_offset(midi, filter=False):
     onset = torch.zeros_like(midi)
     offset = torch.zeros_like(midi)
     
+    onset[:, 0] = (midi[:, 0] > 0).float()
+    offset[:, -1] = (midi[:, -1] > 0).float()
     # For every time step
     for time in range(1, midi.shape[1]):
         # Onset: note active at time t and not t-1

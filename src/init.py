@@ -7,6 +7,7 @@ import numpy as np
 import soundfile as sf
 from scipy.optimize import linear_sum_assignment
 import src.spectrograms as spec
+import src.utils as utils
   
 """
 Initialisation NMF
@@ -265,6 +266,31 @@ def WH_to_MIDI(W, H, notes, threshold=0.02, smoothing_window=5, adaptative=False
     active_midi = [i for i in range(88) if (midi[i,:]>0).any().item()]
     
     return midi, active_midi
+
+def MIDI_to_W(midi, active_midi):
+    onsets, offsets = utils.detect_onset_offset(midi)
+    H = torch.zeros_like(midi, dtype=torch.float)
+    
+    for note in active_midi:
+            # Get indices of onsets and offsets and ensure they are 1D tensors
+            onset_indices = torch.nonzero(onsets[note, :], as_tuple=False).squeeze()
+            offset_indices = torch.nonzero(offsets[note, :], as_tuple=False).squeeze()
+            
+            if onset_indices.dim() > 0 and offset_indices.dim() > 0:
+                if len(offset_indices) < len(onset_indices):
+                    offset_indices = torch.cat([offset_indices, torch.tensor([midi.shape[1] - 1])])
+                    
+                for onset_idx_item, offset_idx_item in zip(onset_indices, offset_indices):
+                    onset_idx = onset_idx_item.item()
+                    offset_idx = offset_idx_item.item()
+
+                    if onset_idx < offset_idx:
+                        decay_length = offset_idx - onset_idx
+                        # Linear decay from 127 to 0
+                        decay = torch.linspace(127, 0, steps=decay_length)
+                        H[note, onset_idx:offset_idx] = decay
+
+    return H
 
 def WH_to_MIDI_tensor(W, H, notes, normalize=False, threshold=0.01, smoothing_window=5, adaptative=True):
     """
