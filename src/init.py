@@ -18,7 +18,7 @@ def first_non_zero(f0):
     non_zero    = torch.argmax(f0_2, 0, keepdim=True)
     return non_zero
 
-def init_W(folder_path=None, hop_length=128, bins_per_octave=36, n_bins=288, verbose=False):
+def init_W(folder_path=None, hop_length=128, bins_per_octave=36, n_bins=288, verbose=False, normalize=True):
     """
     Create a W matrix from all audio files contained in the input path
     By taking the column of highest energy of the CQT
@@ -43,7 +43,7 @@ def init_W(folder_path=None, hop_length=128, bins_per_octave=36, n_bins=288, ver
             assert duration >= min_duration, f"Audio file {fname} is too short. Duration: {duration:.2f}s, Required: {min_duration:.2f}s"
             
             spec_cqt, _, freq = spec.cqt_spec(y, sample_rate=sr, hop_length=hop_length,
-                                    bins_per_octave=bins_per_octave, n_bins=n_bins)
+                                    bins_per_octave=bins_per_octave, n_bins=n_bins, normalize=normalize)
             
             # spec_stft = torch.tensor(np.abs(librosa.stft(y.numpy(), n_fft=n_fft, hop_length=hop_length))[0,:,:])
             
@@ -90,10 +90,10 @@ def init_W(folder_path=None, hop_length=128, bins_per_octave=36, n_bins=288, ver
         
         if verbose:
             print("Initialized W for the model from files")
-    
-        return W, freq, sr, true_freqs
+
     else:
         freqs = librosa.cqt_frequencies(n_bins=n_bins, fmin=librosa.note_to_hz("A0"), bins_per_octave=bins_per_octave)
+        true_freqs = freqs
         midi_notes = range(21, 109)
         note_frequencies = librosa.midi_to_hz(midi_notes)
         bin_indices = np.searchsorted(freqs, note_frequencies)
@@ -102,7 +102,7 @@ def init_W(folder_path=None, hop_length=128, bins_per_octave=36, n_bins=288, ver
             W[bin_idx, col] = 1
         sr = None
         print("Initialized W with synthetic data")
-        return W, freqs, sr
+    return W, freqs, sr, true_freqs
 
 def init_H(l, t, W, M, n_init_steps, beta=1):
     eps = 1e-8
@@ -121,7 +121,7 @@ def init_H(l, t, W, M, n_init_steps, beta=1):
 
         H = H * (numerator / denominator)
     
-    H = H / H.max()
+    # H = H / H.max()
     
     return H
 
@@ -267,28 +267,61 @@ def WH_to_MIDI(W, H, notes, threshold=0.02, smoothing_window=5, adaptative=False
     
     return midi, active_midi
 
-def MIDI_to_W(midi, active_midi):
-    onsets, offsets = utils.detect_onset_offset(midi)
-    H = torch.zeros_like(midi, dtype=torch.float)
+# def MIDI_to_H(midi, active_midi):
+#     onsets, offsets = utils.detect_onset_offset(midi)
+#     H = torch.zeros_like(midi, dtype=torch.float)
     
-    for note in active_midi:
-            # Get indices of onsets and offsets and ensure they are 1D tensors
-            onset_indices = torch.nonzero(onsets[note, :], as_tuple=False).squeeze()
-            offset_indices = torch.nonzero(offsets[note, :], as_tuple=False).squeeze()
+#     for note in active_midi:
+#             # Get indices of onsets and offsets and ensure they are 1D tensors
+#             onset_indices = torch.nonzero(onsets[note, :], as_tuple=False).squeeze()
+#             offset_indices = torch.nonzero(offsets[note, :], as_tuple=False).squeeze()
             
-            if onset_indices.dim() > 0 and offset_indices.dim() > 0:
-                if len(offset_indices) < len(onset_indices):
-                    offset_indices = torch.cat([offset_indices, torch.tensor([midi.shape[1] - 1])])
+#             if onset_indices.dim() > 0 and offset_indices.dim() > 0:
+#                 if len(offset_indices) < len(onset_indices):
+#                     offset_indices = torch.cat([offset_indices, torch.tensor([midi.shape[1] - 1])])
                     
-                for onset_idx_item, offset_idx_item in zip(onset_indices, offset_indices):
-                    onset_idx = onset_idx_item.item()
-                    offset_idx = offset_idx_item.item()
+#                 for onset_idx_item, offset_idx_item in zip(onset_indices, offset_indices):
+#                     onset_idx = onset_idx_item.item()
+#                     offset_idx = offset_idx_item.item()
 
-                    if onset_idx < offset_idx:
-                        decay_length = offset_idx - onset_idx
-                        # Linear decay from 127 to 0
-                        decay = torch.linspace(127, 0, steps=decay_length)
-                        H[note, onset_idx:offset_idx] = decay
+#                     if onset_idx < offset_idx:
+#                         decay_length = offset_idx - onset_idx
+#                         # Linear decay from 127 to 0
+#                         decay = torch.linspace(127, 0, steps=decay_length)
+#                         H[note, onset_idx:offset_idx] = decay
+
+#     return H
+
+def MIDI_to_H(midi, active_midi, onsets=None, offsets=None):
+    if onsets == None:
+        onsets, offsets = utils.detect_onset_offset(midi)
+    H = torch.zeros_like(midi, dtype=torch.float)
+
+    for note in active_midi:
+        # Get indices of onsets and offsets
+        onset_indices = torch.nonzero(onsets[note, :], as_tuple=False).squeeze()
+        offset_indices = torch.nonzero(offsets[note, :], as_tuple=False).squeeze()
+        if onset_indices.dim() == 0:
+            onset_indices = onset_indices.unsqueeze(0)
+        if offset_indices.dim() == 0:
+            offset_indices = offset_indices.unsqueeze(0)
+
+        if len(offset_indices) < len(onset_indices):
+            # Handle the case where there are more onsets than offsets
+            print("There are more onsets than offsets!")
+            offset_indices = torch.cat([offset_indices, torch.tensor([midi.shape[1] - 1])])
+
+        for onset_idx, offset_idx in zip(onset_indices, offset_indices):
+            onset_idx = onset_idx.item()
+            offset_idx = offset_idx.item()
+
+            if onset_idx < offset_idx:
+                decay_length = offset_idx - onset_idx
+                # Linear decay from 127 to 0
+                decay = torch.linspace(127, 0, steps=decay_length)
+                H[note, onset_idx:offset_idx] = decay
+            else:
+                print(f"Warning: onset {onset_idx} is not before offset {offset_idx}")
 
     return H
 

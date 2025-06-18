@@ -27,32 +27,40 @@ def MU_iter(M, l, f, t, n_iter):
     
     return W, H, M_hat
 
-
-def MU(M, W, H, n_iter, beta=1, eps=1e-6):
+def MU(M, W, H, n_iter, beta=1, eps=1e-6, normalize=False):
     
     for _ in range(n_iter):
+        # Compute WH
         Wh = W @ H
         Wh = torch.clamp(Wh, min=eps)
-        Wh_beta_minus_2 = Wh ** (beta - 2)
-        Wh_beta_minus_1 = Wh ** (beta - 1)
-        
-        numerator = (Wh_beta_minus_2 * M) @ H.T
-        denominator = Wh_beta_minus_1 @ H.T + eps
-        denominator = torch.clamp(denominator, min=eps)
-        
-        W = W * (numerator/ denominator)
-        
-        Wh = W @ H
-        Wh = torch.clamp(Wh, min=eps)
+
         Wh_beta_minus_2 = Wh ** (beta - 2)
         Wh_beta_minus_1 = Wh ** (beta - 1)
 
-        numerator = W.T @ (Wh_beta_minus_2 * M)
-        denominator = W.T @ Wh_beta_minus_1 + eps
-        denominator = torch.clamp(denominator, min=eps)
+        # Update W
+        numerator_W = (Wh_beta_minus_2 * M) @ H.T
+        denominator_W = Wh_beta_minus_1 @ H.T #+ eps
+        denominator_W = torch.clamp(denominator_W, min=eps)
 
-        H = H * (numerator / denominator)
+        W = W * (numerator_W / denominator_W)
         
+        if normalize:
+            W = W / (W.sum(dim=1, keepdim=True) )#+ eps)
+
+        # Compute WH again for updating H
+        Wh = W @ H
+        Wh = torch.clamp(Wh, min=eps)
+
+        # Update H
+        numerator_H = W.T @ (Wh_beta_minus_2 * M)
+        denominator_H = W.T @ Wh_beta_minus_1 #+ eps
+        denominator_H = torch.clamp(denominator_H, min=eps)
+
+        H = H * (numerator_H / denominator_H)
+        
+        if normalize:
+            H = H / (H.sum(dim=1, keepdim=True) )#+ eps)
+
     return W, H
 
 class Aw(nn.Module):
@@ -179,12 +187,26 @@ class NALMU_block(nn.Module):
     """
     A single layer/ iteration of the NALMU model
     updating W and H
+    
+    Args:
+        f (int): number of frequency bins in the audio file to be transcribed
+        l (int, optional): the amount of distinct single notes to transcribe (default: ``88``)
+        beta (int, optional): value for the β-divergence (default: ``1`` = KL divergence)
+        eps (int, optional): min value for MU computations (default: ``1e-6``)
+        shared_w (Aw_cnn, optional): whether to use a predefined Aw acceleration matrix or to create one (default: ``None``)
+        learnable_beta (bool, optional): whether to learn the value of beta (default: ``False``)
+        normalize (bool, optional): whether to normalize W and H (default: ``False``)
     """
-    def __init__(self, f, l=88, beta=1, eps=1e-6, shared_w=None, shared_h=None):
+    def __init__(self, f, l=88, beta=1, eps=1e-6, shared_w=None, learnable_beta=False, normalize=False):
         super().__init__()
         
         self.eps    = eps
-        self.beta   = beta
+        self.normalize = normalize
+            
+        if learnable_beta:
+            self.beta = nn.Parameter(torch.tensor(beta)) 
+        else:
+            self.register_buffer("beta", torch.tensor(beta))
         
         self.w_accel = shared_w if shared_w is not None else nn.Parameter(torch.rand(f, l) + self.eps)
 
@@ -212,6 +234,9 @@ class NALMU_block(nn.Module):
         # Avoid going to zero by clamping
         W_new = W * self.w_accel * update_W
         W_new = torch.clamp(W_new, min=self.eps)
+        
+        if self.normalize:
+            W_new = W_new / (W_new.sum(dim=1, keepdim=True) + self.eps)
 
         # Compute WH again with updated W
         wh = W_new @ H + self.eps
@@ -229,6 +254,9 @@ class NALMU_block(nn.Module):
         # Avoid going to zero by clamping
         H_new = H * update_H# H * self.h_accel * update_H
         H_new = torch.clamp(H_new, min=self.eps)
+        
+        if self.normalize:
+            H_new = H_new / (H_new.sum(dim=1, keepdim=True) + self.eps)
 
         return W_new.squeeze(0), H_new.squeeze(0)
     
@@ -236,8 +264,22 @@ class NALMU_block(nn.Module):
 class NALMU(nn.Module) :
     """
     Unrolled NALMU model
+    
+    Args:
+        l (int, optional): the amount of distinct single notes to transcribe (default: ``88``)
+        eps (int, optional): min value for MU computations (default: ``1e-6``)
+        beta (int, optional): value for the β-divergence (default: ``1`` = KL divergence)
+        n_iter (int, optional): the number of unrolled iterations of MU (default: ``10``)
+        W_path (str, optional): the path to the folder containing the recording of all the  notes. If ``None``, W is initialized with artificial data (default: ``None``)
+        n_init_steps (int, optional): the number of MU steps to do to initialize H (default: ``100``)
+        shared (bool, optional): whether Ah and Aw are shared across layers (default: ``False``)
+        n_bins (int, optional): parameter for the cqt representation of W (default: ``288``)
+        bins_per_octave (int, optional): parameter for the cqt representation of W (default: ``36``)
+        learnable_beta (bool, optional): whether to learn the value of beta (default: ``False``)
+        verbose (bool, optional): whether to display some information (default: ``False``)
+        normalize (bool, optional): whether to normalize W and H (default: ``False``)
     """ 
-    def __init__(self, l=88, eps=1e-6, beta=1, n_iter=10, W_path=None, n_init_steps=10, shared=False, n_bins=288, bins_per_octave=36, learnable_beta=False, verbose=False):
+    def __init__(self, l=88, eps=1e-6, beta=1, n_iter=10, W_path=None, n_init_steps=10, shared=False, n_bins=288, bins_per_octave=36, learnable_beta=False, verbose=False, normalize=False):
         super().__init__()
         
         self.n_bins             = n_bins
@@ -252,6 +294,7 @@ class NALMU(nn.Module) :
         self.n_init_steps       = n_init_steps
         self.shared             = shared
         self.verbose            = verbose
+        self.normalize          = normalize
         
         shared_w = nn.Parameter(torch.rand(self.n_bins, self.l) + self.eps) if self.shared else None
         # shared_h = nn.Parameter(torch.rand(self.l, self.t) + self.eps) if self.shared else None
@@ -262,11 +305,11 @@ class NALMU(nn.Module) :
             self.register_buffer("beta", torch.tensor(beta))
         
         self.layers = nn.ModuleList([
-            NALMU_block(self.n_bins, self.l, self.beta, self.eps, shared_w)
+            NALMU_block(self.n_bins, self.l, self.beta, self.eps, shared_w, normalize=self.normalize)
             for _ in range(self.n_iter)
         ])
         
-        W0, freqs, sr, true_freqs = init.init_W(self.W_path, verbose=self.verbose)
+        W0, freqs, _, _ = init.init_W(self.W_path, verbose=self.verbose)
         self.freqs = freqs
         self.register_buffer("W0", W0)
             
@@ -309,8 +352,17 @@ class RALMU_block(nn.Module):
     A single layer/iteration of the RALMU model
     with β-divergence multiplicative updates for W and H.
     Aw and Ah are CNNS
+        
+    Args:
+        beta (int, optional): value for the β-divergence (default: ``1`` = KL divergence)
+        eps (int, optional): min value for MU computations (default: ``1e-6``)
+        shared_aw (Aw_cnn, optional): whether to use a predefined Aw acceleration model or to create one (default: ``None``)
+        shared_aw (Ah_cnn, optional): whether to use a predefined Ah acceleration model or to create one (default: ``None``)
+        use_ah (bool, optional): whether to use Ah in the acceleration of MU (default: ``True``)
+        learnable_beta (bool, optional): whether to learn the value of beta (default: ``False``)
+        normalize (bool, optional): whether to normalize W and H (default: ``False``)
     """
-    def __init__(self, beta=1, eps=1e-6, shared_aw=None, shared_ah=None, use_ah=True, learnable_beta=False):
+    def __init__(self, beta=1, eps=1e-6, shared_aw=None, shared_ah=None, use_ah=True, learnable_beta=False, normalize=False):
         super().__init__()
         
         self.use_ah = use_ah
@@ -323,6 +375,7 @@ class RALMU_block(nn.Module):
         else:
             self.register_buffer("beta", torch.tensor(beta))
         self.eps = eps
+        self.normalize = normalize
 
     def forward(self, M, W, H):
         
@@ -348,6 +401,9 @@ class RALMU_block(nn.Module):
         # Avoid going to zero by clamping
         W_new = W * self.Aw(W) * update_W
         W_new = torch.clamp(W_new, min=self.eps)
+        
+        if self.normalize:
+            W_new = W_new / (W_new.sum(dim=1, keepdim=True) + self.eps)
 
         # Compute WH again with updated W
         wh = W_new @ H + self.eps
@@ -368,13 +424,34 @@ class RALMU_block(nn.Module):
         else:
             H_new = H * update_H
         H_new = torch.clamp(H_new, min=self.eps)
+        
+        if self.normalize:
+            H_new = H_new / (H_new.sum(dim=1, keepdim=True) + self.eps)
 
         return W_new.squeeze(0), H_new.squeeze(0)
 
     
 class RALMU(nn.Module):
+    """
+    Define the RALMU model as n unrolled layers of RALMU block (CNN accelerated MU iterations)
     
-    def __init__(self, l=88, eps=1e-6, beta=1, W_path=None, n_iter=10, n_init_steps=100, hidden=32, use_ah=True, shared=False, n_bins=288, bins_per_octave=36, verbose=False):
+    Args:
+        l (int, optional): the amount of distinct single notes to transcribe (default: ``88``)
+        eps (int, optional): min value for MU computations (default: ``1e-6``)
+        beta (int, optional): value for the β-divergence (default: ``1`` = KL divergence)
+        W_path (str, optional): the path to the folder containing the recording of all the  notes. If ``None``, W is initialized with artificial data (default: ``None``)
+        n_iter (int, optional): the number of unrolled iterations of MU (default: ``10``)
+        n_init_steps (int, optional): the number of MU steps to do to initialize H (default: ``100``)
+        hidden (int, optional): the size of the CNN filters (default: ``32``)
+        use_ah (bool, optional): whether to use Ah in the acceleration of MU (default: ``True``)
+        shared (bool, optional): whether Ah and Aw are shared across layers (default: ``False``)
+        n_bins (int, optional): parameter for the cqt representation of W (default: ``288``)
+        bins_per_octave (int, optional): parameter for the cqt representation of W (default: ``36``)
+        verbose (bool, optional): whether to display some information (default: ``False``)
+        normalize (bool, optional): whether to normalize W and H (default: ``False``)
+    """
+    
+    def __init__(self, l=88, eps=1e-6, beta=1, W_path=None, n_iter=10, n_init_steps=100, hidden=32, use_ah=True, shared=False, n_bins=288, bins_per_octave=36, verbose=False, normalize=False, return_layers=True):
         super().__init__()
         
         self.n_bins          = n_bins
@@ -388,6 +465,8 @@ class RALMU(nn.Module):
         self.n_init_steps   = n_init_steps
         self.shared         = shared
         self.verbose        = verbose
+        self.normalize      = normalize
+        self.return_layers  = return_layers
 
         shared_aw = Aw_cnn(hidden_channels=hidden) if self.shared else None
         if use_ah:
@@ -397,7 +476,7 @@ class RALMU(nn.Module):
 
         # Unrolling layers
         self.layers = nn.ModuleList([
-            RALMU_block(eps=self.eps, shared_aw=shared_aw, shared_ah=shared_ah, use_ah=use_ah)
+            RALMU_block(eps=self.eps, shared_aw=shared_aw, shared_ah=shared_ah, use_ah=use_ah, normalize=self.normalize)
             for _ in range(self.n_iter)
         ])
         
@@ -423,20 +502,26 @@ class RALMU(nn.Module):
         
         W = self.W0
         H = self.H0
+        
+        if self.return_layers:
+            W_layers = []
+            H_layers = []
 
-        W_layers = []
-        H_layers = []
+            for i, layer in enumerate(self.layers):
+                W, H = layer(M, W, H)
+                W_layers.append(W)
+                H_layers.append(H)
+                if W is None or H is None:
+                    print("W or H got to None")
 
-        for i, layer in enumerate(self.layers):
-            W, H = layer(M, W, H)
-            W_layers.append(W)
-            H_layers.append(H)
-            if W is None or H is None:
-                print("W or H got to None")
+            M_hats = [W @ H for W, H in zip(W_layers, H_layers)]
 
-        M_hats = [W @ H for W, H in zip(W_layers, H_layers)]
-
-        return W_layers, H_layers, M_hats
+            return W_layers, H_layers, M_hats
+        else:
+            for layer in self.layers:
+                W, H = layer(M, W, H)
+            M_hat = W @ H
+            return W, H, M_hat
     
     def update_WH(self, W_new, H_new):
         self.W0 = W_new

@@ -8,6 +8,7 @@ import librosa
 import numpy as np
 import matplotlib.pyplot as plt
 import glob, os
+import mir_eval
 import src.spectrograms as spec
 import src.init as init
 
@@ -23,22 +24,37 @@ def model_infos(model, names=False):
     print(f"The model has {total_params} parameters")
 
 class MaestroNMFDataset(Dataset):
+    """
+    creates a Dataset object from a folder of midi and audio files
+    Args:
+        audio_dir (str): the directory for audio (.wav) files
+        midi_dir (str): the directory for midi (.mid) files
+        hop_length (int, optional): define the hop length for the CQT spectrogram (default: ``128``)
+        use_h (bool, optional): whether to use pianoroll midi or H matrix as dataset's item (default: ``False``)
+        fixed_length (bool, optional): whether to have a constant duration for audio/ midi items (default: ``True``)
+        num_files (int, optional): The number of files to include in the dataset. If None, all files are used (default: ``None``)
+    """
     
-    def __init__(self, audio_dir, midi_dir,hop_length=128):
+    def __init__(self, audio_dir, midi_dir, hop_length=128, use_H=False, fixed_length=True, num_files=None):
         assert os.path.isdir(audio_dir) or os.path.isdir(midi_dir), f"The directory '{audio_dir} or {midi_dir}' does not exist"
-        self.audio_files    = sorted(glob.glob(os.path.join(audio_dir, '*.wav')))
-        self.midi_dir       = midi_dir
-        self.hop_length     = hop_length
-        self.min_length = self._determine_min_length()
+        self.audio_files = sorted(glob.glob(os.path.join(audio_dir, '*.wav')))
+        self.midi_dir = midi_dir
+        self.hop_length = hop_length
+        self.use_H = use_H
+        self.fixed_length = fixed_length
+        
+        self.num_files = num_files
+        if num_files is not None and num_files < len(self.audio_files):
+            self.audio_files = self.audio_files[:num_files]
+            
+        self.min_length = self._determine_min_length() if fixed_length else None
+        self.segment_indices = self._precompute_segment_indices() if fixed_length else None
 
     def __len__(self):
-        total_length = 0
-        for audio_path in self.audio_files:
-            waveform, sr = torchaudio.load(audio_path)
-            _, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length)
-            length = times_cqt.shape[0]
-            total_length += length // self.min_length
-        return total_length
+        if self.fixed_length:
+            return sum(self.segment_indices)
+        else:
+            return len(self.audio_files)
 
     def _determine_min_length(self):
         min_length = float('inf')
@@ -50,32 +66,106 @@ class MaestroNMFDataset(Dataset):
                 min_length = length
         return min_length
 
-    def __getitem__(self, idx):
-        current_idx = 0
+    def _precompute_segment_indices(self):
+        segment_indices = []
         for audio_path in self.audio_files:
             waveform, sr = torchaudio.load(audio_path)
-            spec_db, times_cqt, freq_cqt = spec.cqt_spec(waveform, sr, self.hop_length)
-            midi, times_midi = spec.midi_to_pianoroll(
-                os.path.join(self.midi_dir, os.path.basename(audio_path).replace(".wav", ".mid")),
-                waveform, times_cqt, self.hop_length, sr
-            )
-
+            _, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length)
             length = times_cqt.shape[0]
-            num_segments = length // self.min_length
+            segment_indices.append(length // self.min_length)
+        return segment_indices
 
-            if idx < current_idx + num_segments:
-                segment_idx = idx - current_idx
-                start_idx = segment_idx * self.min_length
-                end_idx = start_idx + self.min_length
+    def __getitem__(self, idx):
+        if self.fixed_length:
+            # Find which audio file the idx corresponds to
+            audio_idx = 0
+            while idx >= self.segment_indices[audio_idx]:
+                idx -= self.segment_indices[audio_idx]
+                audio_idx += 1
 
-                spec_db_segment = spec_db[:, start_idx:end_idx]
-                midi_segment = midi[:, start_idx:end_idx]
+            audio_path = self.audio_files[audio_idx]
+            waveform, sr = torchaudio.load(audio_path)
+            spec_db, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length)
+            midi_path = os.path.join(self.midi_dir, os.path.basename(audio_path).replace(".wav", ".mid"))
+            midi, onset, offset, _ = spec.midi_to_pianoroll(midi_path, waveform, times_cqt, self.hop_length)
 
-                return spec_db_segment, midi_segment
+            if self.use_H:
+                active_midi = [i for i in range(88) if (midi[i, :] > 0).any().item()]
+                midi = init.MIDI_to_H(midi, active_midi, onset, offset)
 
-            current_idx += num_segments
+            start_idx = idx * self.min_length
+            end_idx = start_idx + self.min_length
 
-        raise IndexError("Index out of range")
+            spec_db_segment = spec_db[:, start_idx:end_idx]
+            midi_segment = midi[:, start_idx:end_idx]
+
+            return spec_db_segment, midi_segment
+        else:
+            audio_path = self.audio_files[idx]
+            waveform, sr = torchaudio.load(audio_path)
+            spec_db, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length)
+            midi_path = os.path.join(self.midi_dir, os.path.basename(audio_path).replace(".wav", ".mid"))
+            midi, onset, offset, _ = spec.midi_to_pianoroll(midi_path, waveform, times_cqt, self.hop_length, sr)
+
+            if self.use_H:
+                active_midi = [i for i in range(88) if (midi[i, :] > 0).any().item()]
+                midi = init.MIDI_to_H(midi, active_midi, onset, offset)
+
+            return spec_db, midi
+
+"""
+Metrics (Axel's code)
+"""
+
+def compute_scores(estimations, annotations, time_tolerance=0.05):
+    """
+    Compute the F-measure and the accuracy of the transcription_evaluation.
+    """
+    if estimations == []:
+        return 0, 0
+    ref_np = torch.tensor(annotations, float)
+    ref_times = torch.tensor(ref_np[:,0:2], float)
+    ref_pitches = torch.tensor(ref_np[:,2], int)
+
+    est_np = torch.tensor(estimations, float)
+    est_times = torch.tensor(est_np[:,0:2], float)
+    est_pitches = torch.tensor(est_np[:,2], int)
+
+    prec, rec, f_mes, _ = mir_eval.transcription.precision_recall_f1_overlap(ref_times, ref_pitches, est_times, est_pitches, offset_ratio = None, onset_tolerance = time_tolerance, pitch_tolerance = 0.1)
+
+    accuracy = accuracy_from_recall(rec, len(ref_times), len(est_times))
+
+    return prec, rec, f_mes, accuracy
+
+def accuracy_from_recall(recall, N_gt, N_est):
+    """
+    Compute the accuracy from recall, number of samples in ground truth (N_gt), and number of samples in estimation (N_est).
+
+    Parameters
+    ----------
+    recall: float
+        Recall value.
+    N_gt: int
+        Number of samples in ground truth.
+    N_est: int
+        Number of samples in estimation.
+
+    Returns
+    -------
+    accuracy: float
+        The Accuracy
+    """
+    tp = int(recall * N_gt)
+    fn = int(N_gt - tp)
+    fp = int(N_est - tp)
+    return accuracy(tp, fp, fn)
+
+def accuracy(tp, fp, fn):
+    try:
+        return tp/(tp + fp + fn)
+    except ZeroDivisionError:
+        return 0
+
 
 """
 Loss (no  batch_size)
@@ -129,7 +219,7 @@ def detect_onset_offset(midi, filter=False):
     onset[:, 0] = (midi[:, 0] > 0).float()
     offset[:, -1] = (midi[:, -1] > 0).float()
     # For every time step
-    for time in range(1, midi.shape[1]):
+    for time in range(1, midi.shape[1]-1):
         # Onset: note active at time t and not t-1
         onset[:, time] = ((midi[:, time] > 0) & (midi[:, time-1] == 0)).float()
         
@@ -472,24 +562,23 @@ def train(n_epochs, model, optimizer, loader, device, criterion):
     
     return losses#, monitor_reconstruct, monitor_sparsity
 
-def warmup_train(model, n_epochs, loader, optimizer, device, print_grads=False):
+def warmup_train(model, n_epochs, loader, optimizer, device, print_grads=False, debug=False):
     losses = []
     for i in range(n_epochs):
         inter_loss = []
-        for M, midi_batch in loader:
+        for M, _ in loader:
             model.init_H(M.squeeze(0))
             M = M.to(device)
-            W_layers, H_layers, M_hats = model(M)
+            W_layers, H_layers, _ = model(M)
+            
+            ground_truth_norm = torch.norm(model.W0) + torch.norm(model.H0)
             loss = torch.norm(model.W0 - W_layers[-1]) + torch.norm(model.H0 - H_layers[-1])
+            
             optimizer.zero_grad()
             loss.backward()
-            
-            # for name, param in model.named_parameters():
-            #     if param.grad is not None and "w_accel" in name:
-            #         param.grad.data.mul_(10.0)  # Example scaling factor
                     
             optimizer.step()
-            inter_loss.append(loss.item())
+            inter_loss.append((loss.item() / ground_truth_norm) * 100)
             
             if print_grads:
                 for name, param in model.named_parameters():
@@ -499,22 +588,25 @@ def warmup_train(model, n_epochs, loader, optimizer, device, print_grads=False):
                         print(f"Grad is None for {name}")
                 print("====== New audio file ======")
         losses.append(np.mean(inter_loss))
+    if debug:
         print(f"------- epoch {i}, loss = {losses[i]:.3f} -------")
-    plt.plot(losses, label='Reconstruction of W + H loss over epochs')
-    plt.xlabel('epochs')
-    plt.show()
-
+        plt.plot(losses, label='Reconstruction of W + H loss over epochs')
+        plt.xlabel('epochs')
+        plt.show()
+    
+    return losses, W_layers[-1], H_layers[-1]    
+    
 def transribe(model, M, device):
     model.eval()
     model.to(device=device)
 
-    # Initialize W and H for each input tensor
-    model.init_WH(M)
+    # Initialize H for each input tensor
+    model.init_H(M)
 
     with torch.no_grad():
         W_hat, H_hat, M_hat = model(M)
         freqs = librosa.cqt_frequencies(n_bins=288, fmin=librosa.note_to_hz('A0'), bins_per_octave=36)
-        pitches, notes, W_hat, H_hat = init.W_to_pitch(W_hat, freqs, H=H_hat)
-        midi_hat, active_midi = init.WH_to_MIDI(W_hat, H_hat, notes)
+        _, notes = init.W_to_pitch(W_hat, freqs, use_max=True)
+        midi_hat, active_midi = init.WH_to_MIDI(W_hat, H_hat, notes, threshold=0.05)
 
     return W_hat, H_hat, M_hat, midi_hat, active_midi

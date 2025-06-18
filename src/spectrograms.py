@@ -64,7 +64,7 @@ def vis_spectrogram(spec, times, frequencies, start, stop, min_freq, max_freq):
 """
 CQT Spectrogram
 """
-def cqt_spec(signal, sample_rate, hop_length, fmin=librosa.note_to_hz('A0'), bins_per_octave=36, n_bins=288):
+def cqt_spec(signal, sample_rate, hop_length=128, fmin=librosa.note_to_hz('A0'), bins_per_octave=36, n_bins=288, normalize=False):
     """
     Computes the CQT spectrogram
     """
@@ -72,7 +72,9 @@ def cqt_spec(signal, sample_rate, hop_length, fmin=librosa.note_to_hz('A0'), bin
     if signal.shape[0] > 1: # Convert to mono if stereo
         signal = np.mean(signal, axis=0)
     cqt = librosa.cqt(y=signal, sr=sample_rate, hop_length=hop_length, fmin=fmin, n_bins=n_bins, bins_per_octave=bins_per_octave)
-    cqt = np.apply_along_axis(lambda x: x / np.sum(np.abs(x)), axis=0, arr=cqt)
+    
+    if normalize:
+        cqt = np.apply_along_axis(lambda x: x / np.sum(np.abs(x)), axis=0, arr=cqt)
 
     # Convert magnitude to decibels
     spec = np.abs(cqt)
@@ -98,7 +100,7 @@ def max_columns(W):
 
     return W_max
 
-def vis_cqt_spectrogram(spec, times, frequencies, start, stop, set_note_label=False, add_C8=False, cmap="magma"):
+def vis_cqt_spectrogram(spec, times, frequencies, start, stop, set_note_label=False, add_C8=False, cmap="magma", title=None):
     start_idx       = np.searchsorted(times, start)
     stop_idx        = np.searchsorted(times, stop)
 
@@ -123,7 +125,10 @@ def vis_cqt_spectrogram(spec, times, frequencies, start, stop, set_note_label=Fa
         plt.plot(np.arange(time_slice[-1]), [261]*time_slice[-1], color='g', label='4186Hz (C8)')
         plt.legend()
 
-    plt.title("CQT Spectrogram")
+    if title is not None:
+        plt.title(title)
+    else:
+        plt.title("CQT Spectrogram")
     plt.xlabel("Time (s)")
     plt.ylabel("Notes" if set_note_label else "Frequency")
 
@@ -234,8 +239,26 @@ def midi_to_pianoroll(midi_path, waveform, times, hop_length, sr=16000):
     piano_roll = interp_func(times)
     
     piano_roll = (piano_roll > 0).astype(np.float32)
+    
+    onset_matrix = np.zeros_like(piano_roll)
+    offset_matrix = np.zeros_like(piano_roll)
 
-    return torch.from_numpy(piano_roll), times
+    # Fill onset and offset matrices
+    for instrument in midi.instruments:
+        for note in instrument.notes:
+            note_idx = note.pitch - note_start
+            onset_idx = np.argmin(np.abs(times - note.start))
+            offset_idx = np.argmin(np.abs(times - note.end))
+            if onset_idx < onset_matrix.shape[1]:
+                onset_matrix[note_idx, onset_idx] = 1
+            if offset_idx < offset_matrix.shape[1]:
+                offset_matrix[note_idx, offset_idx] = 1
+
+    # Convert to tensors
+    onsets_tensor = torch.from_numpy(onset_matrix).float()
+    offsets_tensor = torch.from_numpy(offset_matrix).float()
+
+    return torch.from_numpy(piano_roll), onsets_tensor, offsets_tensor, times
 
 def vis_midi(midi_mat, times, start, stop):
     start_idx = np.searchsorted(times, start)
@@ -252,7 +275,7 @@ def vis_midi(midi_mat, times, start, stop):
     plt.show()
     return
 
-def compare_midi(midi_gt, midi_hat, times, start, stop):
+def compare_midi(midi_gt, midi_hat, times, start, stop, midi_2=None):
     start_idx = np.searchsorted(times, start)
     stop_idx = np.searchsorted(times, stop)
     time_slice = times[start_idx:stop_idx]
@@ -263,6 +286,9 @@ def compare_midi(midi_gt, midi_hat, times, start, stop):
                 extent=[time_slice[0], time_slice[-1], 21, 109], alpha=0.9, cmap='Reds')  # pitch range A0-C8
     plt.imshow(midi_gt, origin='lower', aspect='auto',
                 extent=[time_slice[0], time_slice[-1], 21, 109], alpha=0.5, cmap="Greens")  # pitch range A0-C8
+    if midi_2 is not None:
+        plt.imshow(midi_2, origin='lower', aspect='auto',
+                extent=[time_slice[0], time_slice[-1], 21, 109], alpha=0.5, cmap="Blues")  # pitch range A0-C8
     plt.title("Predicted vs. Ground truth MIDI Files")
     plt.xlabel("Time (s)")
     plt.ylabel("Pitch")
