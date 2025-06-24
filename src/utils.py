@@ -9,6 +9,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import glob, os
 import mir_eval
+from scipy.optimize import linear_sum_assignment
 import src.spectrograms as spec
 import src.init as init
 
@@ -91,7 +92,7 @@ class MaestroNMFDataset(Dataset):
 
             if self.use_H:
                 active_midi = [i for i in range(88) if (midi[i, :] > 0).any().item()]
-                midi = init.MIDI_to_H(midi, active_midi, onset, offset)
+                midi = init.MIDI_to_H(midi, active_midi)#, onset, offset)
 
             start_idx = idx * self.min_length
             end_idx = start_idx + self.min_length
@@ -109,60 +110,73 @@ class MaestroNMFDataset(Dataset):
 
             if self.use_H:
                 active_midi = [i for i in range(88) if (midi[i, :] > 0).any().item()]
-                midi = init.MIDI_to_H(midi, active_midi, onset, offset)
+                midi = init.MIDI_to_H(midi, active_midi)#, onset, offset)
 
             return spec_db, midi
 
 """
 Metrics (Axel's code)
 """
-
-def compute_scores(estimations, annotations, time_tolerance=0.05):
+def compute_metrics(prediction, ground_truth, time_tolerance=0.05):
     """
-    Compute the F-measure and the accuracy of the transcription_evaluation.
+    Compute the precision, recall, F-measure and the accuracy of the transcription using mir_eval
     """
-    if estimations == []:
-        return 0, 0
-    ref_np = torch.tensor(annotations, float)
-    ref_times = torch.tensor(ref_np[:,0:2], float)
-    ref_pitches = torch.tensor(ref_np[:,2], int)
+    if prediction == []:
+        return 0, 0, 0, 0
+    
+    gt_notes = extract_note_events(ground_truth)
+    pred_notes = extract_note_events(prediction)
+    
+    if len(gt_notes) == 0 or len(pred_notes) == 0:
+        return 0, 0, 0, 0
+    
+    gt_times = gt_notes[:,0:2]
+    gt_pitch = gt_notes[:,2]
+    
+    pred_times = pred_notes[:,0:2]
+    pred_pitch = pred_notes[:,2]
+    
+    if np.any(gt_pitch < 21) or np.any(pred_pitch < 21):
+        raise ValueError("Pitch values must be valid MIDI notes (>= 21).")
 
-    est_np = torch.tensor(estimations, float)
-    est_times = torch.tensor(est_np[:,0:2], float)
-    est_pitches = torch.tensor(est_np[:,2], int)
+    prec, rec, f_mes, _ = mir_eval.transcription.precision_recall_f1_overlap(
+        gt_times, gt_pitch, pred_times, pred_pitch, 
+        offset_ratio = None, onset_tolerance = time_tolerance, pitch_tolerance = 0.1)
 
-    prec, rec, f_mes, _ = mir_eval.transcription.precision_recall_f1_overlap(ref_times, ref_pitches, est_times, est_pitches, offset_ratio = None, onset_tolerance = time_tolerance, pitch_tolerance = 0.1)
-
-    accuracy = accuracy_from_recall(rec, len(ref_times), len(est_times))
+    accuracy = accuracy_from_recall(rec, len(gt_times), len(gt_pitch))
 
     return prec, rec, f_mes, accuracy
+
+def extract_note_events(piano_roll):
+    """
+    Creates a note_event object from a piano_roll tensor
+    The note_event is a list of notes (start, end, pitch)
+    """
+    note_events = []
+    num_notes, num_time_steps = piano_roll.shape
+
+    for pitch in range(num_notes):
+        # Pad the piano roll to handle edge cases
+        padded_piano_roll = torch.cat([torch.zeros(1), piano_roll[pitch, :], torch.zeros(1)])
+
+        note_starts = (padded_piano_roll[1:] > padded_piano_roll[:-1]).nonzero(as_tuple=True)[0]
+        note_ends = (padded_piano_roll[:-1] > padded_piano_roll[1:]).nonzero(as_tuple=True)[0]
+
+        for start, end in zip(note_starts, note_ends):
+            if start < end:
+                note_events.append([start.item(), end.item(), pitch+21])
+
+    return np.array(note_events, dtype=np.int32).reshape(-1, 3)
 
 def accuracy_from_recall(recall, N_gt, N_est):
     """
     Compute the accuracy from recall, number of samples in ground truth (N_gt), and number of samples in estimation (N_est).
-
-    Parameters
-    ----------
-    recall: float
-        Recall value.
-    N_gt: int
-        Number of samples in ground truth.
-    N_est: int
-        Number of samples in estimation.
-
-    Returns
-    -------
-    accuracy: float
-        The Accuracy
     """
     tp = int(recall * N_gt)
     fn = int(N_gt - tp)
     fp = int(N_est - tp)
-    return accuracy(tp, fp, fn)
-
-def accuracy(tp, fp, fn):
     try:
-        return tp/(tp + fp + fn)
+        return tp / (tp + fp + fn)
     except ZeroDivisionError:
         return 0
 
@@ -507,6 +521,51 @@ def compute_loss_batch(M, M_hat, midi, midi_hat, H_hat, lambda_rec=0.1, lambda_s
 """
 Train the network
 """
+def permutation_match(W_new, W_init, rows=False):
+    if rows:
+        # Transpose the matrices to work with rows instead of columns
+        W_init = W_init.T
+        W_new = W_new.T
+    
+    cost_matrix = torch.zeros((W_init.shape[1], W_new.shape[1]))
+    for i in range(W_init.shape[1]):
+        for j in range(W_new.shape[1]):
+            # Use Euclidean distance as the cost metric
+            cost_matrix[i, j] = torch.norm(W_init[:, i] - W_new[:, j])
+            
+    cost_matrix_np = cost_matrix.numpy()
+    row_ind, col_ind = linear_sum_assignment(cost_matrix_np)
+    
+    if rows:
+        W_new_rearranged = W_new[:, col_ind].T
+    else:
+        W_new_rearranged = W_new[:, col_ind]
+        
+    return W_new_rearranged
+
+def soft_permutation_match(W_new, W_init, rows=False):
+    if rows:
+        W_init = W_init.T
+        W_new = W_new.T
+
+    # Compute the cost matrix using Euclidean distance
+    W_init_squared = torch.sum(W_init ** 2, dim=0, keepdim=True)
+    W_new_squared = torch.sum(W_new ** 2, dim=0, keepdim=True)
+    cost_matrix = W_init_squared + W_new_squared.T - 2 * torch.matmul(W_init.T, W_new)
+
+    # Detach the cost matrix from the computational graph before using scipy
+    cost_matrix_np = cost_matrix.detach().cpu().numpy()
+
+    # Use the Hungarian algorithm to find the optimal permutation
+    row_idx, col_idx = linear_sum_assignment(cost_matrix_np)
+
+    if rows:
+        W_new_rearranged = W_new[:, col_idx].T
+    else:
+        W_new_rearranged = W_new[:, col_idx]
+
+    return W_new_rearranged
+
 def train(n_epochs, model, optimizer, loader, device, criterion):
     
     model.train()

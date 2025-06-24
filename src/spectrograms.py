@@ -1,4 +1,3 @@
-import nnAudio.Spectrogram
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
@@ -6,7 +5,6 @@ import pretty_midi
 import torchaudio.transforms as T
 import torch.nn.functional as F
 import librosa
-import nnAudio
 from scipy.interpolate import interp1d
 
 """
@@ -221,6 +219,8 @@ MIDI processing
 """
 def midi_to_pianoroll(midi_path, waveform, times, hop_length, sr=16000):
     midi = pretty_midi.PrettyMIDI(midi_path)
+    
+    n_tracks = len(midi.instruments)
 
     # Keep only piano keys (A0-C8)
     note_start = 21

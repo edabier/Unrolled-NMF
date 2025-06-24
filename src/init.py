@@ -5,7 +5,6 @@ import os
 import librosa
 import numpy as np
 import soundfile as sf
-from scipy.optimize import linear_sum_assignment
 import src.spectrograms as spec
 import src.utils as utils
   
@@ -151,20 +150,6 @@ def frequency_to_note(frequency, thresh):
         return torch.round(midi_note)
     else:
         return torch.tensor(0, dtype=torch.float32)
-
-def W2pitch(W_new, W_init, notes):
-    
-    cost_matrix = torch.zeros((W_init.shape[1], W_new.shape[1]))
-    for i in range(W_init.shape[1]):
-        for j in range(W_new.shape[1]):
-            # Use Euclidean distance as the cost metric
-            cost_matrix[i, j] = torch.norm(W_init[:, i] - W_new[:, j])
-            
-    cost_matrix_np = cost_matrix.numpy()
-    row_ind, col_ind = linear_sum_assignment(cost_matrix_np)
-    # W_new_rearranged = W_new[:, col_ind]
-    notes_new = [notes[i] for i in col_ind]
-    return notes_new
 
 def W_to_pitch(W, true_freqs, thresh=0.4, H=None, use_max=False, sort=False):
     """

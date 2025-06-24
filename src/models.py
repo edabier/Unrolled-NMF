@@ -519,6 +519,9 @@ class RALMU(nn.Module):
             return W_layers, H_layers, M_hats
         else:
             for layer in self.layers:
+                # W_hat, H_hat = layer(M, W, H)
+                # W = W_hat
+                # H = H_hat
                 W, H = layer(M, W, H)
             M_hat = W @ H
             return W, H, M_hat
