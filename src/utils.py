@@ -92,7 +92,7 @@ class MaestroNMFDataset(Dataset):
 
             if self.use_H:
                 active_midi = [i for i in range(88) if (midi[i, :] > 0).any().item()]
-                midi = init.MIDI_to_H(midi, active_midi)#, onset, offset)
+                midi = init.MIDI_to_H(midi, active_midi, onset, offset)
 
             start_idx = idx * self.min_length
             end_idx = start_idx + self.min_length
@@ -110,7 +110,7 @@ class MaestroNMFDataset(Dataset):
 
             if self.use_H:
                 active_midi = [i for i in range(88) if (midi[i, :] > 0).any().item()]
-                midi = init.MIDI_to_H(midi, active_midi)#, onset, offset)
+                midi = init.MIDI_to_H(midi, active_midi, onset, offset)
 
             return spec_db, midi
 
