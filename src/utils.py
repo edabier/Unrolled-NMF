@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 import glob, os
 import mir_eval
 from scipy.optimize import linear_sum_assignment
+
 import src.spectrograms as spec
 import src.init as init
 
@@ -566,7 +567,7 @@ def soft_permutation_match(W_new, W_init, rows=False):
 
     return W_new_rearranged
 
-def train(n_epochs, model, optimizer, loader, device, criterion):
+def old_train(n_epochs, model, optimizer, loader, device, criterion):
     
     model.train()
     model.to(device=device)
@@ -621,39 +622,128 @@ def train(n_epochs, model, optimizer, loader, device, criterion):
     
     return losses#, monitor_reconstruct, monitor_sparsity
 
-def warmup_train(model, n_epochs, loader, optimizer, device, print_grads=False, debug=False):
+def warmup_train(model, n_epochs, loader, optimizer, device, debug=False):
     losses = []
+    H1 = None
     for i in range(n_epochs):
-        inter_loss = []
-        for M, _ in loader:
-            model.init_H(M.squeeze(0))
+        train_loss = 0
+        for idx, (M, _) in enumerate(loader):
+            model.init_H(M[0])
+            if i == 0 and idx==6:
+                H1 = model.H0
             M = M.to(device)
-            W_layers, H_layers, _ = model(M)
+            W_hat, H_hat, _ = model(M)
+            
+            # if i==5 and idx==5:
+            #     spec.vis_cqt_spectrogram(W_hat.detach(), np.arange(W_hat.shape[1]), np.arange(W_hat.shape[0]), 0, W_hat.shape[1], title="Aw(W) with line permuted W")
+            #     W_hat_r = utils.soft_permutation_match(W_hat, model.W0)
+            #     # H_hat_r = utils.soft_permutation_match(H_hat, model.H0, rows=True)
+            #     spec.vis_cqt_spectrogram(W_hat_r.detach(), np.arange(W_hat.shape[1]), np.arange(W_hat.shape[0]), 0, W_hat.shape[1], title="rearranged Aw(W)")
+            # else:
+            W_hat_r = soft_permutation_match(W_hat, model.W0)
+            H_hat_r = soft_permutation_match(H_hat, model.H0, rows=True)
             
             ground_truth_norm = torch.norm(model.W0) + torch.norm(model.H0)
-            loss = torch.norm(model.W0 - W_layers[-1]) + torch.norm(model.H0 - H_layers[-1])
+            train_loss += torch.norm(model.W0 - W_hat_r) + torch.norm(model.H0 - H_hat_r)
             
             optimizer.zero_grad()
-            loss.backward()
+            train_loss.backward()
                     
             optimizer.step()
-            inter_loss.append((loss.item() / ground_truth_norm) * 100)
-            
-            if print_grads:
-                for name, param in model.named_parameters():
-                    if param.grad is not None:
-                        print(f"Grad norm: {param.grad.norm().item()}")
-                    else:
-                        print(f"Grad is None for {name}")
-                print("====== New audio file ======")
-        losses.append(np.mean(inter_loss))
-    if debug:
+            train_loss = train_loss.item() / ground_truth_norm * 100
+        losses.append(train_loss/ len(loader))
         print(f"------- epoch {i}, loss = {losses[i]:.3f} -------")
+    if debug:
         plt.plot(losses, label='Reconstruction of W + H loss over epochs')
         plt.xlabel('epochs')
         plt.show()
+        
+    spec.vis_cqt_spectrogram(W_hat.detach(), np.arange(W_hat.shape[1]), np.arange(W_hat.shape[0]), 0, W_hat.shape[1], title="Aw(W) with line permuted W")
+    spec.vis_cqt_spectrogram(W_hat_r.detach(), np.arange(W_hat_r.shape[1]), np.arange(W_hat_r.shape[0]), 0, W_hat_r.shape[1], title="rearranged Aw(W)")
     
-    return losses, W_layers[-1], H_layers[-1]    
+    return losses, W_hat, H_hat, H1    
+ 
+def train(model, loader, optimizer, criterion, device, epochs, valid_loader=None):
+    train_losses, valid_losses = [], []
+    
+    for epoch in range(epochs):
+        
+        train_loss, valid_loss = 0, 0
+        
+        model.train()
+        for M, H in loader:
+            
+            model.init_H(M[0])
+            M = M.to(device)
+            H = H.to(device)
+            
+            W_hat, H_hat, _ = model(M)
+            
+            H_hat_r = soft_permutation_match(H_hat, model.H0, rows=True)
+            
+            optimizer.zero_grad()
+            loss = criterion(H_hat_r, H[0])
+            loss.backward()
+            optimizer.step()
+            
+            train_loss += loss.item()
+        
+        train_loss /= len(loader)
+        train_losses.append(train_loss)
+        print(f"epoch {epoch}, loss = {train_losses[epoch]:5f}")
+    
+        if valid_loader is not None:
+        
+            model.eval()
+            for M, H in valid_loader:
+                model.init_H(M[0])
+                M = M.to(device)
+                H = H.to(device)
+                
+                with torch.no_grad():
+                    W_hat, H_hat, _ = model(M)
+                
+                H_hat_r = soft_permutation_match(H_hat, model.H0, rows=True)
+                loss = criterion(H_hat_r, H[0])
+                valid_loss += loss.item()
+            
+            valid_loss /= len(valid_loader)
+            valid_losses.append(valid_loss)
+    
+    return train_losses, valid_losses, W_hat, H_hat
+    
+def midi_train(model, loader, optimizer, criterion, device, epochs):
+    losses = []
+    
+    for epoch in range(epochs):
+        
+        epoch_loss = 0
+        
+        for M, midi_gt in loader:
+            
+            model.init_H(M[0])
+            M = M.to(device)
+            midi_gt = midi_gt[0].to(device)
+            
+            W_hat, H_hat, _ = model(M)
+            
+            _, notes_pred = init.W_to_pitch(W_hat, model.freqs, use_max=True)
+            midi_pred, active_pred = init.WH_to_MIDI(W_hat, H_hat, notes_pred, threshold=0.05)
+
+            active_gt = [i for i in range(88) if (midi_gt[i,:] > 0).any().item()]
+            active = list(set(active_gt + active_pred))
+            
+            optimizer.zero_grad()
+            loss = criterion(midi_pred[active,:], midi_gt[active,:])
+    
+            loss.backward()
+            optimizer.step()
+            
+            epoch_loss += loss.detach()
+        losses.append(epoch_loss/ loader.__len__())
+        print(f"epoch {epoch}, loss = {losses[epoch]:5f}")
+    
+    return losses, W_hat, H_hat    
     
 def transribe(model, M, device):
     model.eval()
