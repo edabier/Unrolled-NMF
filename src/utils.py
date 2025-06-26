@@ -1,6 +1,5 @@
 import torch.nn as nn
 import torch.nn.functional as F
-from torchbd.loss import BetaDivLoss
 import torch
 import torchaudio
 from torch.utils.data import Dataset
@@ -114,6 +113,7 @@ class MaestroNMFDataset(Dataset):
                 midi = init.MIDI_to_H(midi, active_midi, onset, offset)
 
             return spec_db, midi
+        
 
 """
 Metrics (Axel's code)
@@ -360,24 +360,24 @@ def compute_midi_loss(midi_hat, midi_gt, active_midi, octave_weight, note_weight
     
     return normalized_loss
     
-def compute_loss(M, M_hat, midi, midi_hat, H_hat):
+# def compute_loss(M, M_hat, midi, midi_hat, H_hat):
         
-    # Reconstruction loss (KL)
-    beta = 1 
-    betaloss = BetaDivLoss(beta=beta)
-    loss_reconstruct = betaloss(input=M_hat, target=M)
+#     # Reconstruction loss (KL)
+#     beta = 1 
+#     betaloss = BetaDivLoss(beta=beta)
+#     loss_reconstruct = betaloss(input=M_hat, target=M)
     
 
-    # Sparsity loss on H (L1)
-    loss_sparsity = torch.sum(torch.abs(H_hat))
+#     # Sparsity loss on H (L1)
+#     loss_sparsity = torch.sum(torch.abs(H_hat))
     
-    # octave_weight, note_weight, sparse_factor = 1, 10, 1e4
-    # active_midi = [i for i in range(88) if (midi[i,:]>0).any().item()]
-    # midi_loss = compute_midi_loss(midi_hat, midi, active_midi, octave_weight, note_weight, sparse_factor)
-    midi_loss = loss_midi(midi_hat, midi)
-    print(f"midi_loss: {midi_loss}")
+#     # octave_weight, note_weight, sparse_factor = 1, 10, 1e4
+#     # active_midi = [i for i in range(88) if (midi[i,:]>0).any().item()]
+#     # midi_loss = compute_midi_loss(midi_hat, midi, active_midi, octave_weight, note_weight, sparse_factor)
+#     midi_loss = loss_midi(midi_hat, midi)
+#     print(f"midi_loss: {midi_loss}")
     
-    return midi_loss, loss_reconstruct, loss_sparsity
+#     return midi_loss, loss_reconstruct, loss_sparsity
    
    
 """
@@ -498,25 +498,25 @@ def compute_midi_loss_batch(midi_hat, midi_gt, active_midi, octave_weight, note_
     
     return normalized_loss
     
-def compute_loss_batch(M, M_hat, midi, midi_hat, H_hat, lambda_rec=0.1, lambda_sparsity=0.01):
+# def compute_loss_batch(M, M_hat, midi, midi_hat, H_hat, lambda_rec=0.1, lambda_sparsity=0.01):
         
-    # Reconstruction loss (KL)
-    beta = 1 
-    loss = BetaDivLoss(beta=beta)
-    loss_rec = loss(M_hat, M)
+#     # Reconstruction loss (KL)
+#     beta = 1 
+#     loss = BetaDivLoss(beta=beta)
+#     loss_rec = loss(M_hat, M)
     
-    active_midi = [i for i in range(88) if (midi[0, i,:]>0).any().item()]
+#     active_midi = [i for i in range(88) if (midi[0, i,:]>0).any().item()]
 
-    # Sparsity loss on H (L1)
-    loss_sparsity = torch.sum(torch.abs(H_hat))
+#     # Sparsity loss on H (L1)
+#     loss_sparsity = torch.sum(torch.abs(H_hat))
     
-    octave_weight, note_weight, sparse_factor = 1, 10, 1e4
-    midi_loss = compute_midi_loss_batch(midi_hat, midi, active_midi, octave_weight, note_weight, sparse_factor)
+#     octave_weight, note_weight, sparse_factor = 1, 10, 1e4
+#     midi_loss = compute_midi_loss_batch(midi_hat, midi, active_midi, octave_weight, note_weight, sparse_factor)
 
-    # Total loss
-    total_loss = midi_loss + lambda_rec * loss_rec + lambda_sparsity * loss_sparsity
+#     # Total loss
+#     total_loss = midi_loss + lambda_rec * loss_rec + lambda_sparsity * loss_sparsity
     
-    return total_loss   
+#     return total_loss   
    
    
 """
