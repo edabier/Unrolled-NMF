@@ -484,15 +484,18 @@ class RALMU(nn.Module):
         self.freqs = freqs
         self.register_buffer("W0", W0)
             
-    def init_H(self, M):
+    def init_H(self, M, device=None):
         if len(M.shape) == 3:
             # Batched input (training phase)
             _, f, t = M.shape
         elif len(M.shape) == 2:
             # Non-batched input (inference phase)
             f, t = M.shape
-            
-        H0 = init.init_H(self.l, t, self.W0, M, n_init_steps=self.n_init_steps, beta=self.beta) 
+        
+        if device is not None:
+            H0 = init.init_H(self.l, t, self.W0, M, n_init_steps=self.n_init_steps, beta=self.beta, device=device)
+        else: 
+            H0 = init.init_H(self.l, t, self.W0, M, n_init_steps=self.n_init_steps, beta=self.beta) 
 
         self.register_buffer("H0", H0)
     

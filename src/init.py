@@ -1,6 +1,5 @@
 import torch
 import torchaudio
-import torchyin
 import os
 import librosa
 import numpy as np
@@ -103,10 +102,13 @@ def init_W(folder_path=None, hop_length=128, bins_per_octave=36, n_bins=288, ver
         print("Initialized W with synthetic data")
     return W, freqs, sr, true_freqs
 
-def init_H(l, t, W, M, n_init_steps, beta=1):
+def init_H(l, t, W, M, n_init_steps, beta=1, device=None):
     eps = 1e-8
     H = torch.rand(l, t) + eps
     
+    if device is not None:
+        H = H.to(device)
+        
     # create H with n iterations of MU
     for i in range(n_init_steps):
         Wh = W @ H

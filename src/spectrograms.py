@@ -5,7 +5,11 @@ import pretty_midi
 import torchaudio.transforms as T
 import torch.nn.functional as F
 import librosa
+import warnings
 from scipy.interpolate import interp1d
+
+# Problem in the pretty_midi library, some files are not loaded correctly, this patches the problem
+pretty_midi.pretty_midi.MAX_TICK = 1e10
 
 """
 SFT Spectrogram
@@ -69,6 +73,8 @@ def cqt_spec(signal, sample_rate, hop_length=128, fmin=librosa.note_to_hz('A0'),
     signal  = signal.squeeze().numpy()
     if signal.shape[0] > 1: # Convert to mono if stereo
         signal = np.mean(signal, axis=0)
+    
+    warnings.filterwarnings("ignore", message="n_fft=.* is too large for input signal of length=")
     cqt = librosa.cqt(y=signal, sr=sample_rate, hop_length=hop_length, fmin=fmin, n_bins=n_bins, bins_per_octave=bins_per_octave)
     
     if normalize:

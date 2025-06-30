@@ -5,6 +5,7 @@ import torchaudio
 from torch.utils.data import Dataset
 import librosa
 import numpy as np
+import wandb
 import matplotlib.pyplot as plt
 import glob, os
 import mir_eval
@@ -24,7 +25,7 @@ def model_infos(model, names=False):
             print(f"Layer: {name} | Size: {param.size()}")
     print(f"The model has {total_params} parameters")
 
-class MaestroNMFDataset(Dataset):
+class NMFDataset(Dataset):
     """
     creates a Dataset object from a folder of midi and audio files
     Args:
@@ -114,6 +115,194 @@ class MaestroNMFDataset(Dataset):
 
             return spec_db, midi
         
+
+class MapsDataset(Dataset):
+    """
+    Creates a Dataset object from Maps' metadata
+
+    Args:
+        metadata (pd.DataFrame): DataFrame containing 'file_path' and 'midi_path' columns.
+        hop_length (int, optional): Define the hop length for the CQT spectrogram (default: 128).
+        use_H (bool, optional): Whether to use pianoroll MIDI or H matrix as dataset's item (default: False).
+        fixed_length (bool, optional): Whether to have a constant duration for audio/MIDI items (default: True).
+        percentage (float, optional): The percentage of files to include in the dataset. If None, all files are used (default: None).
+    """
+    def __init__(self, metadata, hop_length=128, use_H=False, fixed_length=True, subset=None):
+        assert 'file_path' in metadata.columns and 'midi_path' in metadata.columns, "Metadata should contain 'file_path' and 'midi_path' columns."
+
+        self.metadata = metadata
+        self.hop_length = hop_length
+        self.use_H = use_H
+        self.fixed_length = fixed_length
+
+        if subset is not None:
+            num_files = int(len(metadata) * subset)
+            self.metadata = self.metadata.iloc[:num_files]
+
+        self.min_length = self._determine_min_length() if fixed_length else None
+        self.segment_indices = self._precompute_segment_indices() if fixed_length else None
+
+    def __len__(self):
+        if self.fixed_length:
+            return sum(self.segment_indices)
+        else:
+            return len(self.metadata)
+
+    def _determine_min_length(self):
+        min_length = float('inf')
+        for _, row in self.metadata.iterrows():
+            waveform, sr = torchaudio.load(row['file_path'])
+            _, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length)
+            length = times_cqt.shape[0]
+            if length < min_length:
+                min_length = length
+        return min_length
+
+    def _precompute_segment_indices(self):
+        segment_indices = []
+        for _, row in self.metadata.iterrows():
+            waveform, sr = torchaudio.load(row['file_path'])
+            _, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length)
+            length = times_cqt.shape[0]
+            segment_indices.append(length // self.min_length)
+        return segment_indices
+
+    def __getitem__(self, idx):
+        if self.fixed_length:
+            audio_idx = 0
+            while idx >= self.segment_indices[audio_idx]:
+                idx -= self.segment_indices[audio_idx]
+                audio_idx += 1
+
+            row = self.metadata.iloc[audio_idx]
+            try:
+                waveform, sr = torchaudio.load(row['file_path'])
+                spec_db, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length)
+                midi, onset, offset, _ = spec.midi_to_pianoroll(row['midi_path'], waveform, times_cqt, self.hop_length)
+
+                if self.use_H:
+                    active_midi = [i for i in range(88) if (midi[i, :] > 0).any().item()]
+                    midi = init.MIDI_to_H(midi, active_midi, onset, offset)
+
+                start_idx = idx * self.min_length
+                end_idx = start_idx + self.min_length
+
+                spec_db_segment = spec_db[:, start_idx:end_idx]
+                midi_segment = midi[:, start_idx:end_idx]
+
+                return spec_db_segment, midi_segment
+            except Exception as e:
+                print(f"Skipping {row['midi_path']} due to error: {e}")
+                return self.__getitem__((idx + 1) % len(self))
+        else:
+            row = self.metadata.iloc[idx]
+            try:
+                waveform, sr = torchaudio.load(row['file_path'])
+                spec_db, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length)
+                midi, onset, offset, _ = spec.midi_to_pianoroll(row['midi_path'], waveform, times_cqt, self.hop_length, sr)
+
+                if self.use_H:
+                    active_midi = [i for i in range(88) if (midi[i, :] > 0).any().item()]
+                    midi = init.MIDI_to_H(midi, active_midi, onset, offset)
+
+                return spec_db, midi
+            except Exception as e:
+                print(f"Skipping {row['midi_path']} due to error: {e}")
+                return self.__getitem__((idx + 1) % len(self))
+
+class MapsDataset(Dataset):
+    """
+    Creates a Dataset object from Maps' metadata
+
+    Args:
+        metadata (pd.DataFrame): DataFrame containing 'file_path' and 'midi_path' columns.
+        hop_length (int, optional): Define the hop length for the CQT spectrogram (default: 128).
+        use_H (bool, optional): Whether to use pianoroll MIDI or H matrix as dataset's item (default: False).
+        fixed_length (bool, optional): Whether to have a constant duration for audio/MIDI items (default: True).
+        percentage (float, optional): The percentage of files to include in the dataset. If None, all files are used (default: None).
+    """
+    def __init__(self, metadata, hop_length=128, use_H=False, fixed_length=True, subset=None):
+        assert 'file_path' in metadata.columns and 'midi_path' in metadata.columns, "Metadata should contain 'file_path' and 'midi_path' columns."
+
+        self.metadata = metadata
+        self.hop_length = hop_length
+        self.use_H = use_H
+        self.fixed_length = fixed_length
+
+        if subset is not None:
+            num_files = int(len(metadata) * subset)
+            self.metadata = self.metadata.iloc[:num_files]
+
+        self.min_length = self._determine_min_length() if fixed_length else None
+        self.segment_indices = self._precompute_segment_indices() if fixed_length else None
+
+    def __len__(self):
+        if self.fixed_length:
+            return sum(self.segment_indices)
+        else:
+            return len(self.metadata)
+
+    def _determine_min_length(self):
+        min_length = float('inf')
+        for _, row in self.metadata.iterrows():
+            waveform, sr = torchaudio.load(row['file_path'])
+            _, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length)
+            length = times_cqt.shape[0]
+            if length < min_length:
+                min_length = length
+        return min_length
+
+    def _precompute_segment_indices(self):
+        segment_indices = []
+        for _, row in self.metadata.iterrows():
+            waveform, sr = torchaudio.load(row['file_path'])
+            _, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length)
+            length = times_cqt.shape[0]
+            segment_indices.append(length // self.min_length)
+        return segment_indices
+
+    def __getitem__(self, idx):
+        if self.fixed_length:
+            audio_idx = 0
+            while idx >= self.segment_indices[audio_idx]:
+                idx -= self.segment_indices[audio_idx]
+                audio_idx += 1
+
+            row = self.metadata.iloc[audio_idx]
+            try:
+                waveform, sr = torchaudio.load(row['file_path'])
+                spec_db, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length)
+                midi, onset, offset, _ = spec.midi_to_pianoroll(row['midi_path'], waveform, times_cqt, self.hop_length)
+
+                if self.use_H:
+                    active_midi = [i for i in range(88) if (midi[i, :] > 0).any().item()]
+                    midi = init.MIDI_to_H(midi, active_midi, onset, offset)
+
+                start_idx = idx * self.min_length
+                end_idx = start_idx + self.min_length
+
+                spec_db_segment = spec_db[:, start_idx:end_idx]
+                midi_segment = midi[:, start_idx:end_idx]
+
+                return spec_db_segment, midi_segment
+            except Exception as e:
+                print(f"Skipping {row['midi_path']} due to error: {e}")
+                return self.__getitem__((idx + 1) % len(self))
+        else:
+            row = self.metadata.iloc[idx]
+            try:
+                waveform, sr = torchaudio.load(row['file_path'])
+                spec_db, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length)
+                midi, onset, offset, _ = spec.midi_to_pianoroll(row['midi_path'], waveform, times_cqt, self.hop_length, sr)
+
+                if self.use_H:
+                    active_midi = [i for i in range(88) if (midi[i, :] > 0).any().item()]
+                    midi = init.MIDI_to_H(midi, active_midi, onset, offset)
+
+                return spec_db, midi
+            except Exception as e:
+                print(f"Skipping {row['midi_path']} due to error: {e}")
+                return self.__getitem__((idx + 1) % len(self))
 
 """
 Metrics (Axel's code)
@@ -360,24 +549,24 @@ def compute_midi_loss(midi_hat, midi_gt, active_midi, octave_weight, note_weight
     
     return normalized_loss
     
-# def compute_loss(M, M_hat, midi, midi_hat, H_hat):
+def compute_loss(M, M_hat, midi, midi_hat, H_hat):
         
-#     # Reconstruction loss (KL)
-#     beta = 1 
-#     betaloss = BetaDivLoss(beta=beta)
-#     loss_reconstruct = betaloss(input=M_hat, target=M)
+    # Reconstruction loss (KL)
+    beta = 1 
+    betaloss = BetaDivLoss(beta=beta)
+    loss_reconstruct = betaloss(input=M_hat, target=M)
     
 
-#     # Sparsity loss on H (L1)
-#     loss_sparsity = torch.sum(torch.abs(H_hat))
+    # Sparsity loss on H (L1)
+    loss_sparsity = torch.sum(torch.abs(H_hat))
     
-#     # octave_weight, note_weight, sparse_factor = 1, 10, 1e4
-#     # active_midi = [i for i in range(88) if (midi[i,:]>0).any().item()]
-#     # midi_loss = compute_midi_loss(midi_hat, midi, active_midi, octave_weight, note_weight, sparse_factor)
-#     midi_loss = loss_midi(midi_hat, midi)
-#     print(f"midi_loss: {midi_loss}")
+    # octave_weight, note_weight, sparse_factor = 1, 10, 1e4
+    # active_midi = [i for i in range(88) if (midi[i,:]>0).any().item()]
+    # midi_loss = compute_midi_loss(midi_hat, midi, active_midi, octave_weight, note_weight, sparse_factor)
+    midi_loss = loss_midi(midi_hat, midi)
+    print(f"midi_loss: {midi_loss}")
     
-#     return midi_loss, loss_reconstruct, loss_sparsity
+    return midi_loss, loss_reconstruct, loss_sparsity
    
    
 """
@@ -498,25 +687,25 @@ def compute_midi_loss_batch(midi_hat, midi_gt, active_midi, octave_weight, note_
     
     return normalized_loss
     
-# def compute_loss_batch(M, M_hat, midi, midi_hat, H_hat, lambda_rec=0.1, lambda_sparsity=0.01):
+def compute_loss_batch(M, M_hat, midi, midi_hat, H_hat, lambda_rec=0.1, lambda_sparsity=0.01):
         
-#     # Reconstruction loss (KL)
-#     beta = 1 
-#     loss = BetaDivLoss(beta=beta)
-#     loss_rec = loss(M_hat, M)
+    # Reconstruction loss (KL)
+    beta = 1 
+    loss = BetaDivLoss(beta=beta)
+    loss_rec = loss(M_hat, M)
     
-#     active_midi = [i for i in range(88) if (midi[0, i,:]>0).any().item()]
+    active_midi = [i for i in range(88) if (midi[0, i,:]>0).any().item()]
 
-#     # Sparsity loss on H (L1)
-#     loss_sparsity = torch.sum(torch.abs(H_hat))
+    # Sparsity loss on H (L1)
+    loss_sparsity = torch.sum(torch.abs(H_hat))
     
-#     octave_weight, note_weight, sparse_factor = 1, 10, 1e4
-#     midi_loss = compute_midi_loss_batch(midi_hat, midi, active_midi, octave_weight, note_weight, sparse_factor)
+    octave_weight, note_weight, sparse_factor = 1, 10, 1e4
+    midi_loss = compute_midi_loss_batch(midi_hat, midi, active_midi, octave_weight, note_weight, sparse_factor)
 
-#     # Total loss
-#     total_loss = midi_loss + lambda_rec * loss_rec + lambda_sparsity * loss_sparsity
+    # Total loss
+    total_loss = midi_loss + lambda_rec * loss_rec + lambda_sparsity * loss_sparsity
     
-#     return total_loss   
+    return total_loss   
    
    
 """
@@ -634,12 +823,6 @@ def warmup_train(model, n_epochs, loader, optimizer, device, debug=False):
             M = M.to(device)
             W_hat, H_hat, _ = model(M)
             
-            # if i==5 and idx==5:
-            #     spec.vis_cqt_spectrogram(W_hat.detach(), np.arange(W_hat.shape[1]), np.arange(W_hat.shape[0]), 0, W_hat.shape[1], title="Aw(W) with line permuted W")
-            #     W_hat_r = utils.soft_permutation_match(W_hat, model.W0)
-            #     # H_hat_r = utils.soft_permutation_match(H_hat, model.H0, rows=True)
-            #     spec.vis_cqt_spectrogram(W_hat_r.detach(), np.arange(W_hat.shape[1]), np.arange(W_hat.shape[0]), 0, W_hat.shape[1], title="rearranged Aw(W)")
-            # else:
             W_hat_r = soft_permutation_match(W_hat, model.W0)
             H_hat_r = soft_permutation_match(H_hat, model.H0, rows=True)
             
@@ -664,7 +847,17 @@ def warmup_train(model, n_epochs, loader, optimizer, device, debug=False):
     return losses, W_hat, H_hat, H1    
  
 def train(model, loader, optimizer, criterion, device, epochs, valid_loader=None):
+    run = wandb.init(
+        project=f"{model.__class__.__name__}_train",
+        config={
+            "learning_rate": optimizer.param_groups[-1]['lr'],
+            "batch_size": loader.batch_size,
+            "epochs": epochs,
+        },
+    )
+    
     train_losses, valid_losses = [], []
+    valid_loss_min = np.inf
     
     for epoch in range(epochs):
         
@@ -673,9 +866,10 @@ def train(model, loader, optimizer, criterion, device, epochs, valid_loader=None
         model.train()
         for M, H in loader:
             
-            model.init_H(M[0])
             M = M.to(device)
             H = H.to(device)
+            
+            model.init_H(M[0], device=device)
             
             W_hat, H_hat, _ = model(M)
             
@@ -690,15 +884,18 @@ def train(model, loader, optimizer, criterion, device, epochs, valid_loader=None
         
         train_loss /= len(loader)
         train_losses.append(train_loss)
-        print(f"epoch {epoch}, loss = {train_losses[epoch]:5f}")
+        print(f"epoch {epoch}, loss = {train_loss:5f}")
+        wandb.log({"training loss": train_loss})
     
         if valid_loader is not None:
         
             model.eval()
             for M, H in valid_loader:
-                model.init_H(M[0])
+                
                 M = M.to(device)
                 H = H.to(device)
+                
+                model.init_H(M[0], device=device)
                 
                 with torch.no_grad():
                     W_hat, H_hat, _ = model(M)
@@ -709,6 +906,14 @@ def train(model, loader, optimizer, criterion, device, epochs, valid_loader=None
             
             valid_loss /= len(valid_loader)
             valid_losses.append(valid_loss)
+            wandb.log({"valid loss": valid_loss})
+            
+        if valid_loss <= valid_loss_min:
+          print('validation loss decreased ({:.6f} --> {:.6f}).  Saving model ...'.format(
+          valid_loss_min,
+          valid_loss))
+          torch.save(model.state_dict(), f'/home/ids/edabier/AMT/Unrolled-NMF/models/{model.__class__.__name__}.pt')
+          valid_loss_min = valid_loss
     
     return train_losses, valid_losses, W_hat, H_hat
     
@@ -721,8 +926,8 @@ def midi_train(model, loader, optimizer, criterion, device, epochs):
         
         for M, midi_gt in loader:
             
-            model.init_H(M[0])
             M = M.to(device)
+            model.init_H(M[0], device=device)
             midi_gt = midi_gt[0].to(device)
             
             W_hat, H_hat, _ = model(M)
