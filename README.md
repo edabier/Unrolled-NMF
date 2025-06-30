@@ -8,13 +8,13 @@ Automatically transcribe any audio file using a pretrained unrolled NMF model
 **/src**:
     contains the implementation of the model and some functions for the training
 
-**{piano, synth}-dataset**:
+**/{piano, synth}-dataset**:
     Contain 7 audio/ MIDI files pair as small toy datasets (recordings from virtual piano and virtual synth)
 
-**model**:
+**/models**:
     contains pretrained models weights
 
-**cluster**:
+**/cluster**:
     contains all the necessary material to run a training on the cluster
 
 ### Steps to train:
