@@ -21,20 +21,23 @@ if __name__ == '__main__':
     parser.add_argument("--lr", default=1e-2, type=float)
     parser.add_argument("--epochs", default=20, type=int)
     parser.add_argument("--batch", default=1, type=int)
+    parser.add_argument("--subset", default=1, type=float)
+    parser.add_argument("--split", default=0.8, type=float)
     args = parser.parse_args()
 
     lr = args.lr
     epochs = args.epochs
     batch_size = args.batch
+    subset = args.subset
+    split = args.split
     
     #########################################################
     print("Loading the dataset...")
     maps = music.Maps("/tsi/mir/maps")
     metadata = maps.pdf_metadata
-    dataset = utils.MapsDataset(metadata, fixed_length=True, subset=0.01)
-
-    train_size      = 0.8
-    train_set, valid_set = torch.utils.data.random_split(dataset, [train_size, 1-train_size])   
+    dataset = utils.MapsDataset(metadata, fixed_length=True, subset=subset)
+    
+    train_set, valid_set = torch.utils.data.random_split(dataset, [split, 1-split])   
     train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=False)
     valid_loader = DataLoader(valid_set, batch_size=batch_size, shuffle=False)
     

@@ -16,6 +16,8 @@ echo "Job started at: $(date)"
 LR="1e-3"
 EPOCHS=10
 BATCH_SIZE=1
+SUBSET=0.01
+SPLIT=0.8
 
 # Activate the environment
 source ~/miniconda3/etc/profile.d/conda.sh
@@ -23,7 +25,7 @@ conda activate amt-env
 # wandb login
 
 # Execute the Python script with specific arguments
-srun python /home/ids/edabier/AMT/Unrolled-NMF/trainer.py --lr $LR --epochs $EPOCHS --batch $BATCH_SIZE
+srun python /home/ids/edabier/AMT/Unrolled-NMF/trainer.py --lr $LR --epochs $EPOCHS --batch $BATCH_SIZE --subset $SUBSET --split $SPLIT
 
 # Retrieve and log job information
 LOG_FILE="job_tracking.log"
