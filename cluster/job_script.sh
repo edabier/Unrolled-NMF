@@ -13,6 +13,7 @@ echo "Starting job on node: $(hostname)"
 echo "Job started at: $(date)"
 
 # Define variables for the job
+ITER=10
 LR="1e-3"
 EPOCHS=10
 BATCH_SIZE=1
@@ -25,7 +26,7 @@ conda activate amt-env
 # wandb login
 
 # Execute the Python script with specific arguments
-srun python /home/ids/edabier/AMT/Unrolled-NMF/trainer.py --lr $LR --epochs $EPOCHS --batch $BATCH_SIZE --subset $SUBSET --split $SPLIT
+srun python /home/ids/edabier/AMT/Unrolled-NMF/trainer.py --iter $ITER --lr $LR --epochs $EPOCHS --batch $BATCH_SIZE --subset $SUBSET --split $SPLIT
 
 # Retrieve and log job information
 LOG_FILE="job_tracking.log"

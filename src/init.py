@@ -43,8 +43,6 @@ def init_W(folder_path=None, hop_length=128, bins_per_octave=36, n_bins=288, ver
             spec_cqt, _, freq = spec.cqt_spec(y, sample_rate=sr, hop_length=hop_length,
                                     bins_per_octave=bins_per_octave, n_bins=n_bins, normalize=normalize)
             
-            # spec_stft = torch.tensor(np.abs(librosa.stft(y.numpy(), n_fft=n_fft, hop_length=hop_length))[0,:,:])
-            
             if len(fname) == 7:
                 note, octave = fname[0:2], int(fname[2])
             else:
@@ -53,28 +51,10 @@ def init_W(folder_path=None, hop_length=128, bins_per_octave=36, n_bins=288, ver
             expected_freq = midi_to_hz(torch.tensor(midi_note, dtype=torch.float32))
             true_freqs.append(expected_freq)
             
-            # f0 = torchyin.estimate(y, sample_rate=sr, pitch_min=20, pitch_max=5000)
-            # funda = first_non_zero(f0[0])
-            # print(f"note: {fname},  pitch: {f0[0,funda]}, true: {expected_freq}")
-            # freqs.append(f0[0, funda])
-            
             # Choose frame with max energy (sum across frequencies)
             energy_per_frame = spec_cqt.sum(axis=0)
             best_frame_idx = torch.argmax(energy_per_frame)
             template = spec_cqt[:,best_frame_idx]
-            # _, top_indices = torch.topk(energy_per_frame, avg_size)
-            # selected_frames = spec_cqt[:, top_indices]
-            # template = selected_frames
-            # template = torch.mean(selected_frames, dim=1)
-            
-            # # Select the column with the highest harmonic sum
-            # harmonic_sum = torch.zeros(spec_cqt.shape[0])
-            # for i in range(spec_cqt.shape[0]):
-            #     harmonic_indices = torch.arange(i, spec_cqt.shape[0], i + 1)  # Indices of harmonics
-            #     harmonic_sum[i] = torch.sum(spec_cqt[harmonic_indices, :])
-
-            # max_energy_index = torch.argmax(harmonic_sum)
-            # template = spec_cqt[:, max_energy_index]
 
             templates.append(template)
 
@@ -84,7 +64,6 @@ def init_W(folder_path=None, hop_length=128, bins_per_octave=36, n_bins=288, ver
         
         # W of shape f * (88*n)
         W = torch.stack(templates, axis=1)
-        # W = torch.cat(templates, dim=1)
         
         if verbose:
             print("Initialized W for the model from files")

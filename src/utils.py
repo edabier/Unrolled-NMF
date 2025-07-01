@@ -210,104 +210,10 @@ class MapsDataset(Dataset):
                 print(f"Skipping {row['midi_path']} due to error: {e}")
                 return self.__getitem__((idx + 1) % len(self))
 
-class MapsDataset(Dataset):
-    """
-    Creates a Dataset object from Maps' metadata
-
-    Args:
-        metadata (pd.DataFrame): DataFrame containing 'file_path' and 'midi_path' columns.
-        hop_length (int, optional): Define the hop length for the CQT spectrogram (default: 128).
-        use_H (bool, optional): Whether to use pianoroll MIDI or H matrix as dataset's item (default: False).
-        fixed_length (bool, optional): Whether to have a constant duration for audio/MIDI items (default: True).
-        percentage (float, optional): The percentage of files to include in the dataset. If None, all files are used (default: None).
-    """
-    def __init__(self, metadata, hop_length=128, use_H=False, fixed_length=True, subset=None):
-        assert 'file_path' in metadata.columns and 'midi_path' in metadata.columns, "Metadata should contain 'file_path' and 'midi_path' columns."
-
-        self.metadata = metadata
-        self.hop_length = hop_length
-        self.use_H = use_H
-        self.fixed_length = fixed_length
-
-        if subset is not None:
-            num_files = int(len(metadata) * subset)
-            self.metadata = self.metadata.iloc[:num_files]
-
-        self.min_length = self._determine_min_length() if fixed_length else None
-        self.segment_indices = self._precompute_segment_indices() if fixed_length else None
-
-    def __len__(self):
-        if self.fixed_length:
-            return sum(self.segment_indices)
-        else:
-            return len(self.metadata)
-
-    def _determine_min_length(self):
-        min_length = float('inf')
-        for _, row in self.metadata.iterrows():
-            waveform, sr = torchaudio.load(row['file_path'])
-            _, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length)
-            length = times_cqt.shape[0]
-            if length < min_length:
-                min_length = length
-        return min_length
-
-    def _precompute_segment_indices(self):
-        segment_indices = []
-        for _, row in self.metadata.iterrows():
-            waveform, sr = torchaudio.load(row['file_path'])
-            _, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length)
-            length = times_cqt.shape[0]
-            segment_indices.append(length // self.min_length)
-        return segment_indices
-
-    def __getitem__(self, idx):
-        if self.fixed_length:
-            audio_idx = 0
-            while idx >= self.segment_indices[audio_idx]:
-                idx -= self.segment_indices[audio_idx]
-                audio_idx += 1
-
-            row = self.metadata.iloc[audio_idx]
-            try:
-                waveform, sr = torchaudio.load(row['file_path'])
-                spec_db, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length)
-                midi, onset, offset, _ = spec.midi_to_pianoroll(row['midi_path'], waveform, times_cqt, self.hop_length)
-
-                if self.use_H:
-                    active_midi = [i for i in range(88) if (midi[i, :] > 0).any().item()]
-                    midi = init.MIDI_to_H(midi, active_midi, onset, offset)
-
-                start_idx = idx * self.min_length
-                end_idx = start_idx + self.min_length
-
-                spec_db_segment = spec_db[:, start_idx:end_idx]
-                midi_segment = midi[:, start_idx:end_idx]
-
-                return spec_db_segment, midi_segment
-            except Exception as e:
-                print(f"Skipping {row['midi_path']} due to error: {e}")
-                return self.__getitem__((idx + 1) % len(self))
-        else:
-            row = self.metadata.iloc[idx]
-            try:
-                waveform, sr = torchaudio.load(row['file_path'])
-                spec_db, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length)
-                midi, onset, offset, _ = spec.midi_to_pianoroll(row['midi_path'], waveform, times_cqt, self.hop_length, sr)
-
-                if self.use_H:
-                    active_midi = [i for i in range(88) if (midi[i, :] > 0).any().item()]
-                    midi = init.MIDI_to_H(midi, active_midi, onset, offset)
-
-                return spec_db, midi
-            except Exception as e:
-                print(f"Skipping {row['midi_path']} due to error: {e}")
-                return self.__getitem__((idx + 1) % len(self))
-
 """
 Metrics (Axel's code)
 """
-def compute_metrics(prediction, ground_truth, time_tolerance=0.05):
+def compute_metrics(prediction, ground_truth, time_tolerance=0.05, threshold=0):
     """
     Compute the precision, recall, F-measure and the accuracy of the transcription using mir_eval
     """
@@ -315,7 +221,7 @@ def compute_metrics(prediction, ground_truth, time_tolerance=0.05):
         return 0, 0, 0, 0
     
     gt_notes = extract_note_events(ground_truth)
-    pred_notes = extract_note_events(prediction)
+    pred_notes = extract_note_events(prediction, threshold=threshold)
     
     if len(gt_notes) == 0 or len(pred_notes) == 0:
         return 0, 0, 0, 0
@@ -335,26 +241,29 @@ def compute_metrics(prediction, ground_truth, time_tolerance=0.05):
 
     accuracy = accuracy_from_recall(rec, len(gt_times), len(gt_pitch))
 
-    return prec, rec, f_mes, accuracy
+    return prec, rec, f_mes, accuracy#, gt_notes, pred_notes
 
-def extract_note_events(piano_roll):
+def extract_note_events(piano_roll, threshold=0):
     """
     Creates a note_event object from a piano_roll tensor
     The note_event is a list of notes (start, end, pitch)
     """
+    # Pad the tensor to handle edge cases
+    padded_tensor = torch.zeros(piano_roll.shape[0], piano_roll.shape[1] + 2, device=piano_roll.device)
+    padded_tensor[:, 1:-1] = piano_roll
+
     note_events = []
-    num_notes, num_time_steps = piano_roll.shape
+    note_starts = ((padded_tensor[:, :-1] <= threshold) & (padded_tensor[:, 1:] > threshold)).nonzero(as_tuple=True)
+    note_ends = ((padded_tensor[:, :-1] > threshold) & (padded_tensor[:, 1:] <= threshold)).nonzero(as_tuple=True)
 
-    for pitch in range(num_notes):
-        # Pad the piano roll to handle edge cases
-        padded_piano_roll = torch.cat([torch.zeros(1), piano_roll[pitch, :], torch.zeros(1)])
+    # Iterate over each pitch and pair starts with ends
+    for pitch in range(padded_tensor.shape[0]):
+        starts = note_starts[1][note_starts[0] == pitch]
+        ends = note_ends[1][note_ends[0] == pitch]
 
-        note_starts = (padded_piano_roll[1:] > padded_piano_roll[:-1]).nonzero(as_tuple=True)[0]
-        note_ends = (padded_piano_roll[:-1] > padded_piano_roll[1:]).nonzero(as_tuple=True)[0]
-
-        for start, end in zip(note_starts, note_ends):
-            if start < end:
-                note_events.append([start.item(), end.item(), pitch+21])
+        # Pair each start with an end
+        for start, end in zip(starts, ends):
+            note_events.append([start.item(), end.item(), pitch+21])
 
     return np.array(note_events, dtype=np.int32).reshape(-1, 3)
 
@@ -548,25 +457,6 @@ def compute_midi_loss(midi_hat, midi_gt, active_midi, octave_weight, note_weight
     # print(f"Losses: onset= {l_onset}, offset= {l_offset}, pitch= {l_pitch}, total= {loss}, normalized= {normalized_loss}")
     
     return normalized_loss
-    
-def compute_loss(M, M_hat, midi, midi_hat, H_hat):
-        
-    # Reconstruction loss (KL)
-    beta = 1 
-    betaloss = BetaDivLoss(beta=beta)
-    loss_reconstruct = betaloss(input=M_hat, target=M)
-    
-
-    # Sparsity loss on H (L1)
-    loss_sparsity = torch.sum(torch.abs(H_hat))
-    
-    # octave_weight, note_weight, sparse_factor = 1, 10, 1e4
-    # active_midi = [i for i in range(88) if (midi[i,:]>0).any().item()]
-    # midi_loss = compute_midi_loss(midi_hat, midi, active_midi, octave_weight, note_weight, sparse_factor)
-    midi_loss = loss_midi(midi_hat, midi)
-    print(f"midi_loss: {midi_loss}")
-    
-    return midi_loss, loss_reconstruct, loss_sparsity
    
    
 """
@@ -686,27 +576,6 @@ def compute_midi_loss_batch(midi_hat, midi_gt, active_midi, octave_weight, note_
     print(f"Losses: onset= {l_onset}, offset= {l_offset}, pitch= {l_pitch}, total= {loss}, normalized= {normalized_loss}")
     
     return normalized_loss
-    
-def compute_loss_batch(M, M_hat, midi, midi_hat, H_hat, lambda_rec=0.1, lambda_sparsity=0.01):
-        
-    # Reconstruction loss (KL)
-    beta = 1 
-    loss = BetaDivLoss(beta=beta)
-    loss_rec = loss(M_hat, M)
-    
-    active_midi = [i for i in range(88) if (midi[0, i,:]>0).any().item()]
-
-    # Sparsity loss on H (L1)
-    loss_sparsity = torch.sum(torch.abs(H_hat))
-    
-    octave_weight, note_weight, sparse_factor = 1, 10, 1e4
-    midi_loss = compute_midi_loss_batch(midi_hat, midi, active_midi, octave_weight, note_weight, sparse_factor)
-
-    # Total loss
-    total_loss = midi_loss + lambda_rec * loss_rec + lambda_sparsity * loss_sparsity
-    
-    return total_loss   
-   
    
 """
 Train the network

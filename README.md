@@ -19,7 +19,7 @@ Automatically transcribe any audio file using a pretrained unrolled NMF model
 
 ### Steps to train:
 
-In the **/cluster** folder, the `job_script.sh` file is the one containing the command to be ran on the cluster, you can modify here the `learning_rate`(LR), the number of `epochs` to be made (EPOCHS), the `batch_size` (BATCH), the size of the `subset` of the dataset to train on (SUBSET), as well as the train/ test `split` size (SPLIT) 
+In the **/cluster** folder, the `job_script.sh` file is the one containing the command to be ran on the cluster, you can modify here the amount of unrolled iterations that the model has (ITER), the `learning_rate`(LR), the number of `epochs` to be made (EPOCHS), the `batch_size` (BATCH), the size of the subset of the dataset to train on (SUBSET), as well as the train/ test split size (SPLIT) 
 
 This command will run the `trainer.py` file that loads the dataset (*MAPS*), loads the model and trains it with the provided parameters.
 
