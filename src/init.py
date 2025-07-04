@@ -4,6 +4,7 @@ import os
 import librosa
 import numpy as np
 import soundfile as sf
+
 import src.spectrograms as spec
 import src.utils as utils
   
@@ -41,12 +42,13 @@ def init_W(folder_path=None, hop_length=128, bins_per_octave=36, n_bins=288, ver
             assert duration >= min_duration, f"Audio file {fname} is too short. Duration: {duration:.2f}s, Required: {min_duration:.2f}s"
             
             spec_cqt, _, freq = spec.cqt_spec(y, sample_rate=sr, hop_length=hop_length,
-                                    bins_per_octave=bins_per_octave, n_bins=n_bins, normalize=normalize)
+                                    bins_per_octave=bins_per_octave, n_bins=n_bins, normalize=normalize, is_torch=True)
             
             if len(fname) == 7:
                 note, octave = fname[0:2], int(fname[2])
             else:
                 note, octave = fname[0], int(fname[1])
+                
             midi_note = note_to_midi[note] + (octave + 2) * 12  - 12 # MIDI note number
             expected_freq = midi_to_hz(torch.tensor(midi_note, dtype=torch.float32))
             true_freqs.append(expected_freq)

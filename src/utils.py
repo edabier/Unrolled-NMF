@@ -2,13 +2,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch
 import torchaudio
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Sampler
 import librosa
 import numpy as np
 import wandb
 import matplotlib.pyplot as plt
 import glob, os
 import mir_eval
+from tqdm import tqdm
 from scipy.optimize import linear_sum_assignment
 
 import src.spectrograms as spec
@@ -87,7 +88,7 @@ class NMFDataset(Dataset):
 
             audio_path = self.audio_files[audio_idx]
             waveform, sr = torchaudio.load(audio_path)
-            spec_db, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length)
+            M, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length)
             midi_path = os.path.join(self.midi_dir, os.path.basename(audio_path).replace(".wav", ".mid"))
             midi, onset, offset, _ = spec.midi_to_pianoroll(midi_path, waveform, times_cqt, self.hop_length)
 
@@ -98,14 +99,14 @@ class NMFDataset(Dataset):
             start_idx = idx * self.min_length
             end_idx = start_idx + self.min_length
 
-            spec_db_segment = spec_db[:, start_idx:end_idx]
+            M_segment = M[:, start_idx:end_idx]
             midi_segment = midi[:, start_idx:end_idx]
 
-            return spec_db_segment, midi_segment
+            return M_segment, midi_segment
         else:
             audio_path = self.audio_files[idx]
             waveform, sr = torchaudio.load(audio_path)
-            spec_db, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length)
+            M, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length)
             midi_path = os.path.join(self.midi_dir, os.path.basename(audio_path).replace(".wav", ".mid"))
             midi, onset, offset, _ = spec.midi_to_pianoroll(midi_path, waveform, times_cqt, self.hop_length, sr)
 
@@ -113,8 +114,47 @@ class NMFDataset(Dataset):
                 active_midi = [i for i in range(88) if (midi[i, :] > 0).any().item()]
                 midi = init.MIDI_to_H(midi, active_midi, onset, offset)
 
-            return spec_db, midi
+            return M, midi
+    
+def collate_fn(batch):
+    # Sort batch by length (descending order)
+    M_data = [item[0] for item in batch]
+    
+    max_length = max(M.shape[1] for M in M_data)
+
+    padded_M_data = []
+    padded_H_data = []
+    for M, H in batch:
+        current_length = M.shape[1]
+        # print(current_length)
+        pad_length = max_length - current_length
         
+        # Pad by duplicating the beginning of the data
+        if pad_length > 0:
+            # Ensure we don't exceed the available data when duplicating
+            num_duplications = (pad_length // current_length) + 1
+            M_pad = M[:, :pad_length]
+            H_pad = H[:, :pad_length]
+            
+            M_pad = M_pad.repeat(1, num_duplications)[:, :pad_length]
+            H_pad = H_pad.repeat(1, num_duplications)[:, :pad_length]
+
+            # Concatenate the original data with the duplicated segment
+            padded_M = torch.cat([M, M_pad], dim=1)
+            padded_H = torch.cat([H, H_pad], dim=1)
+        else:
+            # If no padding is needed, use the original data
+            padded_M = M
+            padded_H = H
+        
+        padded_M_data.append(padded_M)
+        padded_H_data.append(padded_H)
+
+    # Stack the batch elements into tensors
+    padded_M_data = torch.stack(padded_M_data)
+    padded_H_data = torch.stack(padded_H_data)
+
+    return padded_M_data, padded_H_data        
 
 class MapsDataset(Dataset):
     """
@@ -125,12 +165,12 @@ class MapsDataset(Dataset):
         hop_length (int, optional): Define the hop length for the CQT spectrogram (default: 128).
         use_H (bool, optional): Whether to use pianoroll MIDI or H matrix as dataset's item (default: False).
         fixed_length (bool, optional): Whether to have a constant duration for audio/MIDI items (default: True).
-        percentage (float, optional): The percentage of files to include in the dataset. If None, all files are used (default: None).
+        subset (float, optional): The subset of files to include in the dataset. If None, all files are used (default: None).
     """
-    def __init__(self, metadata, hop_length=128, use_H=False, fixed_length=True, subset=None):
+    def __init__(self, metadata, hop_length=128, use_H=False, fixed_length=True, subset=None, verbose=False):
         assert 'file_path' in metadata.columns and 'midi_path' in metadata.columns, "Metadata should contain 'file_path' and 'midi_path' columns."
 
-        self.metadata = metadata
+        self.metadata = metadata.copy()
         self.hop_length = hop_length
         self.use_H = use_H
         self.fixed_length = fixed_length
@@ -138,9 +178,23 @@ class MapsDataset(Dataset):
         if subset is not None:
             num_files = int(len(metadata) * subset)
             self.metadata = self.metadata.iloc[:num_files]
-
-        self.min_length = self._determine_min_length() if fixed_length else None
+        
+        if verbose:
+            print("Computing the length of files...")
+        self.lengths = self._compute_lengths()
+        self.metadata.loc[:, 'length'] = self.lengths
+        self.metadata = self.metadata.sort_values(by='length')
+        
+        self.min_length = self.metadata['length'].min() if fixed_length else None
         self.segment_indices = self._precompute_segment_indices() if fixed_length else None
+    
+    def _compute_lengths(self):
+        lengths = []
+        for _, row in tqdm(self.metadata.iterrows()):
+            waveform, sr = torchaudio.load(row['file_path'])
+            _, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length, is_torch=True)
+            lengths.append(times_cqt.shape[0])
+        return np.array(lengths)
 
     def __len__(self):
         if self.fixed_length:
@@ -152,7 +206,7 @@ class MapsDataset(Dataset):
         min_length = float('inf')
         for _, row in self.metadata.iterrows():
             waveform, sr = torchaudio.load(row['file_path'])
-            _, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length)
+            _, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length, is_torch=True)
             length = times_cqt.shape[0]
             if length < min_length:
                 min_length = length
@@ -162,7 +216,7 @@ class MapsDataset(Dataset):
         segment_indices = []
         for _, row in self.metadata.iterrows():
             waveform, sr = torchaudio.load(row['file_path'])
-            _, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length)
+            _, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length, is_torch=True)
             length = times_cqt.shape[0]
             segment_indices.append(length // self.min_length)
         return segment_indices
@@ -177,7 +231,7 @@ class MapsDataset(Dataset):
             row = self.metadata.iloc[audio_idx]
             try:
                 waveform, sr = torchaudio.load(row['file_path'])
-                spec_db, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length)
+                M, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length, is_torch=True)
                 midi, onset, offset, _ = spec.midi_to_pianoroll(row['midi_path'], waveform, times_cqt, self.hop_length)
 
                 if self.use_H:
@@ -187,10 +241,10 @@ class MapsDataset(Dataset):
                 start_idx = idx * self.min_length
                 end_idx = start_idx + self.min_length
 
-                spec_db_segment = spec_db[:, start_idx:end_idx]
+                M_segment = M[:, start_idx:end_idx]
                 midi_segment = midi[:, start_idx:end_idx]
 
-                return spec_db_segment, midi_segment
+                return M_segment, midi_segment
             except Exception as e:
                 print(f"Skipping {row['midi_path']} due to error: {e}")
                 return self.__getitem__((idx + 1) % len(self))
@@ -198,20 +252,20 @@ class MapsDataset(Dataset):
             row = self.metadata.iloc[idx]
             try:
                 waveform, sr = torchaudio.load(row['file_path'])
-                spec_db, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length)
+                M, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length, is_torch=True)
                 midi, onset, offset, _ = spec.midi_to_pianoroll(row['midi_path'], waveform, times_cqt, self.hop_length, sr)
 
                 if self.use_H:
                     active_midi = [i for i in range(88) if (midi[i, :] > 0).any().item()]
                     midi = init.MIDI_to_H(midi, active_midi, onset, offset)
 
-                return spec_db, midi
+                return M, midi
             except Exception as e:
                 print(f"Skipping {row['midi_path']} due to error: {e}")
                 return self.__getitem__((idx + 1) % len(self))
 
 """
-Metrics (Axel's code)
+Metrics
 """
 def compute_metrics(prediction, ground_truth, time_tolerance=0.05, threshold=0):
     """
@@ -716,14 +770,14 @@ def warmup_train(model, n_epochs, loader, optimizer, device, debug=False):
     return losses, W_hat, H_hat, H1    
  
 def train(model, loader, optimizer, criterion, device, epochs, valid_loader=None):
-    run = wandb.init(
-        project=f"{model.__class__.__name__}_train",
-        config={
-            "learning_rate": optimizer.param_groups[-1]['lr'],
-            "batch_size": loader.batch_size,
-            "epochs": epochs,
-        },
-    )
+    # run = wandb.init(
+    #     project=f"{model.__class__.__name__}_train",
+    #     config={
+    #         "learning_rate": optimizer.param_groups[-1]['lr'],
+    #         "batch_size": loader.batch_size,
+    #         "epochs": epochs,
+    #     },
+    # )
     
     train_losses, valid_losses = [], []
     valid_loss_min = np.inf
@@ -739,6 +793,7 @@ def train(model, loader, optimizer, criterion, device, epochs, valid_loader=None
             H = H.to(device)
             
             model.init_H(M[0], device=device)
+            print(f"M_gt: {M.shape}, H_gt: {H.shape}, W_model: {model.W0.shape}, H_model: {model.H0.shape}")
             
             W_hat, H_hat, _ = model(M)
             
@@ -754,7 +809,7 @@ def train(model, loader, optimizer, criterion, device, epochs, valid_loader=None
         train_loss /= len(loader)
         train_losses.append(train_loss)
         print(f"epoch {epoch}, loss = {train_loss:5f}")
-        wandb.log({"training loss": train_loss})
+        # wandb.log({"training loss": train_loss})
     
         if valid_loader is not None:
         
@@ -775,7 +830,7 @@ def train(model, loader, optimizer, criterion, device, epochs, valid_loader=None
             
             valid_loss /= len(valid_loader)
             valid_losses.append(valid_loss)
-            wandb.log({"valid loss": valid_loss})
+            # wandb.log({"valid loss": valid_loss})
             
         if valid_loss <= valid_loss_min:
           print('validation loss decreased ({:.6f} --> {:.6f}).  Saving model ...'.format(

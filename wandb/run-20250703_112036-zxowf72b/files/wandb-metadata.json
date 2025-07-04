@@ -1,0 +1,43 @@
+{
+  "os":  "Linux-5.15.0-125-generic-x86_64-with-glibc2.35",
+  "python":  "CPython 3.9.23",
+  "startedAt":  "2025-07-03T09:20:36.096152Z",
+  "program":  "/home/ids/edabier/AMT/Unrolled-NMF/training_on_dataset.ipynb",
+  "codePath":  "training_on_dataset.ipynb",
+  "codePathLocal":  "training_on_dataset.ipynb",
+  "git":  {
+    "remote":  "https://github.com/edabier/Unrolled-NMF.git",
+    "commit":  "8e5929730d29d876bc397cd7ec0cb5a6620b223d"
+  },
+  "email":  "edgard.dabier@imt-atlantique.net",
+  "root":  "/home/ids/edabier/AMT/Unrolled-NMF",
+  "host":  "node45.enst.fr",
+  "executable":  "/home/ids/edabier/miniconda3/envs/amt-env/bin/python",
+  "cpu_count":  40,
+  "cpu_count_logical":  80,
+  "gpu":  "Tesla P100-PCIE-16GB",
+  "gpu_count":  1,
+  "disk":  {
+    "/":  {
+      "total":  "1178084843520",
+      "used":  "94221160448"
+    }
+  },
+  "memory":  {
+    "total":  "135048773632"
+  },
+  "gpu_nvidia":  [
+    {
+      "name":  "Tesla P100-PCIE-16GB",
+      "memoryTotal":  "17179869184",
+      "cudaCores":  3584,
+      "architecture":  "Pascal",
+      "uuid":  "GPU-9512768a-487c-8752-2e1b-b020f3a1acc1"
+    }
+  ],
+  "cudaVersion":  "12.7",
+  "slurm":  {
+    "job_id":  "361932"
+  },
+  "writerId":  "5tm64j3i4puejp3shy952akky3qh0ks0"
+}

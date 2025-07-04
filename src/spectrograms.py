@@ -5,6 +5,8 @@ import pretty_midi
 import torchaudio.transforms as T
 import torch.nn.functional as F
 import librosa
+import nnAudio.features.cqt as nn_cqt
+import time
 import warnings
 from scipy.interpolate import interp1d
 
@@ -66,24 +68,48 @@ def vis_spectrogram(spec, times, frequencies, start, stop, min_freq, max_freq):
 """
 CQT Spectrogram
 """
-def cqt_spec(signal, sample_rate, hop_length=128, fmin=librosa.note_to_hz('A0'), bins_per_octave=36, n_bins=288, normalize=False):
+def cqt_spec(signal, sample_rate, hop_length=128, fmin=librosa.note_to_hz('A0'), bins_per_octave=36, n_bins=288, normalize=False, is_torch=False):
     """
     Computes the CQT spectrogram
     """
-    signal  = signal.squeeze().numpy()
-    if signal.shape[0] > 1: # Convert to mono if stereo
-        signal = np.mean(signal, axis=0)
+    if is_torch:
+        # Convert to mono if stereo
+        signal = signal.squeeze()
+        if signal.dim() > 1 and signal.shape[0] > 1:
+            signal = torch.mean(signal, dim=0)
+            
+        warnings.filterwarnings("ignore", message="n_fft=.* is too large for input signal of length=")
+        
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        signal = signal.to(device)
+        
+        cqt_transform = nn_cqt.CQT2010v2(sr=sample_rate, hop_length=hop_length, fmin=fmin, n_bins=n_bins, bins_per_octave=bins_per_octave, verbose=False)
+        # cqt_load = time.time()
+        
+        with torch.no_grad():
+            cqt = cqt_transform(signal)
+            cqt = cqt.squeeze(0)
+        cqt_time = time.time()
+        # print(f"getting cqt: {cqt_time - cqt_load}")
+            
+        if normalize:
+            cqt = cqt / torch.sum(torch.abs(cqt), dim=0, keepdim=True)
+            
+        # Convert magnitude to decibels
+        spec = torch.abs(cqt)
+        
+    else:
+        signal  = signal.squeeze().numpy()
+        if signal.shape[0] > 1: # Convert to mono if stereo
+            signal = np.mean(signal, axis=0)
+ 
+        cqt = librosa.cqt(y=signal, sr=sample_rate, hop_length=hop_length, fmin=fmin, n_bins=n_bins, bins_per_octave=bins_per_octave)
     
-    warnings.filterwarnings("ignore", message="n_fft=.* is too large for input signal of length=")
-    cqt = librosa.cqt(y=signal, sr=sample_rate, hop_length=hop_length, fmin=fmin, n_bins=n_bins, bins_per_octave=bins_per_octave)
-    
-    if normalize:
-        cqt = np.apply_along_axis(lambda x: x / np.sum(np.abs(x)), axis=0, arr=cqt)
+        if normalize:
+            cqt = np.apply_along_axis(lambda x: x / np.sum(np.abs(x)), axis=0, arr=cqt)
 
-    # Convert magnitude to decibels
-    spec = np.abs(cqt)
-    # spec = librosa.amplitude_to_db(np.abs(cqt), top_db=top_db)
-    # spec = spec - spec.min() + 1e-8
+        # Convert magnitude to decibels
+        spec = np.abs(cqt)
     
     # Time axis
     num_frames  = spec.shape[1]
@@ -93,7 +119,10 @@ def cqt_spec(signal, sample_rate, hop_length=128, fmin=librosa.note_to_hz('A0'),
     # Frequency axis
     frequencies = librosa.cqt_frequencies(n_bins=n_bins, fmin=fmin, bins_per_octave=bins_per_octave)
     
-    return torch.from_numpy(spec), times, frequencies
+    if is_torch:
+        return spec, times, frequencies
+    else:
+        return torch.from_numpy(spec), times, frequencies
 
 def max_columns(W):
     max_values, _ = torch.max(W, dim=0)
