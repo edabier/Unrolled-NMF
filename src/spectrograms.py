@@ -133,7 +133,7 @@ def max_columns(W):
 
     return W_max
 
-def vis_cqt_spectrogram(spec, times, frequencies, start, stop, set_note_label=False, add_C8=False, cmap="magma", title=None):
+def vis_cqt_spectrogram(spec, times, frequencies, start, stop, set_note_label=False, add_C8=False, cmap="magma", title=None, x_axis=None):
     start_idx       = np.searchsorted(times, start)
     stop_idx        = np.searchsorted(times, stop)
 
@@ -162,7 +162,10 @@ def vis_cqt_spectrogram(spec, times, frequencies, start, stop, set_note_label=Fa
         plt.title(title)
     else:
         plt.title("CQT Spectrogram")
-    plt.xlabel("Time (s)")
+    if x_axis is not None:
+        plt.xlabel(x_axis)
+    else:
+        plt.xlabel("Time (s)")
     plt.ylabel("Notes" if set_note_label else "Frequency")
 
     # Set y-ticks to note names
