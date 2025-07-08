@@ -806,9 +806,7 @@ def train(model, loader, optimizer, criterion, device, epochs, valid_loader=None
             M = M.to(device)
             H = H.to(device)
             
-            model.init_H(M, device=device)
-            
-            W_hat, H_hat, _ = model(M)
+            W_hat, H_hat, _ = model(M, device=device)
             
             # H_hat_r = soft_permutation_match(H_hat, model.H0, rows=True)
             

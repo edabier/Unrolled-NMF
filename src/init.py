@@ -94,6 +94,8 @@ def init_H(l, t, W, M, n_init_steps, beta=1, device=None, batch_size=None):
     if device is not None:
         H = H.to(device)
         
+    print(M.shape, W.shape, H.shape)
+        
     # create H with n iterations of MU
     for _ in range(n_init_steps):
         

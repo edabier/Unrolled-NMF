@@ -519,12 +519,22 @@ class RALMU(nn.Module):
 
         self.register_buffer("H0", H0)
     
-    def forward(self, M):
+    def forward(self, M, device=None):
         
-        assert hasattr(self, 'W0') or hasattr(self, 'H0'), "Please run init_WH, W0 or H0 are not initialized"
+        # assert hasattr(self, 'H0'), "Please run init_H, H0 is not initialized"
+        assert hasattr(self, 'W0'), "Model has no initialization for W"
         
         W = self.W0
-        H = self.H0
+        # H = self.H0
+        
+        batch_size=None
+        if len(M.shape) == 3:
+            # Batched input (training phase)
+            batch_size, _, t = M.shape
+        elif len(M.shape) == 2:
+            # Non-batched input (inference phase)
+            _, t = M.shape
+        H = init.init_H(self.l, t, self.W0, M, n_init_steps=self.n_init_steps, beta=self.beta, device=device, batch_size=batch_size)
         
         if self.return_layers:
             W_layers = []
@@ -548,7 +558,3 @@ class RALMU(nn.Module):
                 W, H = layer(M, W, H)
             M_hat = W @ H
             return W, H, M_hat
-    
-    def update_WH(self, W_new, H_new):
-        self.W0 = W_new
-        self.H0 = H_new
