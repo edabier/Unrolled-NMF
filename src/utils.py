@@ -7,7 +7,7 @@ import librosa
 import numpy as np
 import wandb
 import matplotlib.pyplot as plt
-import glob, os
+import glob, os, warnings
 import mir_eval
 from tqdm import tqdm
 from scipy.optimize import linear_sum_assignment
@@ -115,46 +115,43 @@ class NMFDataset(Dataset):
                 midi = init.MIDI_to_H(midi, active_midi, onset, offset)
 
             return M, midi
+        
+class SequentialBatchSampler(Sampler):
+    def __init__(self, data_source, batch_size):
+        self.data_source = data_source
+        self.batch_size = batch_size
+
+    def __iter__(self):
+        indices = list(range(len(self.data_source)))
+        # Split indices into batches
+        batches = [indices[i:i + self.batch_size] for i in range(0, len(indices), self.batch_size)]
+        # Flatten the list of batches
+        return iter(batches)
+
+    def __len__(self):
+        return len(self.data_source) // self.batch_size
+    
+def pad_by_repeating(tensor, max_length):
+    if tensor.size(1) < max_length:
+        repeat_times = int(np.ceil(max_length / tensor.size(1)))
+        repeated_tensor = tensor.repeat(1, repeat_times)[:, :max_length]
+        return repeated_tensor
+    return tensor
     
 def collate_fn(batch):
-    # Sort batch by length (descending order)
-    M_data = [item[0] for item in batch]
+    # Separate audio and MIDI files
+    audio_files = [item[0] for item in batch]
+    midi_files = [item[1] for item in batch]
     
-    max_length = max(M.shape[1] for M in M_data)
+    max_audio_length = max(audio.size(1) for audio in audio_files)
+    max_midi_length = max(midi.size(1) for midi in midi_files)
 
-    padded_M_data = []
-    padded_H_data = []
-    for M, H in batch:
-        current_length = M.shape[1]
-        # print(current_length)
-        pad_length = max_length - current_length
-        
-        # Pad by duplicating the beginning of the data
-        if pad_length > 0:
-            # Ensure we don't exceed the available data when duplicating
-            num_duplications = (pad_length // current_length) + 1
-            M_pad = M[:, :pad_length]
-            H_pad = H[:, :pad_length]
-            
-            M_pad = M_pad.repeat(1, num_duplications)[:, :pad_length]
-            H_pad = H_pad.repeat(1, num_duplications)[:, :pad_length]
+    # Pad audio and MIDI files by repeating their data
+    audio_files_padded = torch.stack([pad_by_repeating(audio, max_audio_length) for audio in audio_files])
+    midi_files_padded = torch.stack([pad_by_repeating(midi, max_midi_length) for midi in midi_files])
 
-            # Concatenate the original data with the duplicated segment
-            padded_M = torch.cat([M, M_pad], dim=1)
-            padded_H = torch.cat([H, H_pad], dim=1)
-        else:
-            # If no padding is needed, use the original data
-            padded_M = M
-            padded_H = H
-        
-        padded_M_data.append(padded_M)
-        padded_H_data.append(padded_H)
-
-    # Stack the batch elements into tensors
-    padded_M_data = torch.stack(padded_M_data)
-    padded_H_data = torch.stack(padded_H_data)
-
-    return padded_M_data, padded_H_data        
+    # Return them as lists to avoid stacking
+    return audio_files_padded, midi_files_padded      
 
 class MapsDataset(Dataset):
     """
@@ -166,8 +163,9 @@ class MapsDataset(Dataset):
         use_H (bool, optional): Whether to use pianoroll MIDI or H matrix as dataset's item (default: False).
         fixed_length (bool, optional): Whether to have a constant duration for audio/MIDI items (default: True).
         subset (float, optional): The subset of files to include in the dataset. If None, all files are used (default: None).
+        mean_filter (bool, optional): Whether to filter the dataset to keep only files with length > mean(length) (default: `False`)
     """
-    def __init__(self, metadata, hop_length=128, use_H=False, fixed_length=True, subset=None, verbose=False):
+    def __init__(self, metadata, hop_length=128, use_H=False, fixed_length=True, subset=None, mean_filter=False, verbose=False):
         assert 'file_path' in metadata.columns and 'midi_path' in metadata.columns, "Metadata should contain 'file_path' and 'midi_path' columns."
 
         self.metadata = metadata.copy()
@@ -185,6 +183,10 @@ class MapsDataset(Dataset):
         self.metadata.loc[:, 'length'] = self.lengths
         self.metadata = self.metadata.sort_values(by='length')
         
+        if mean_filter:
+            mean_length = self.metadata['length'].mean()
+            self.metadata = self.metadata[self.metadata['length'] > mean_length].reset_index(drop=True)
+        
         self.min_length = self.metadata['length'].min() if fixed_length else None
         self.segment_indices = self._precompute_segment_indices() if fixed_length else None
     
@@ -192,7 +194,7 @@ class MapsDataset(Dataset):
         lengths = []
         for _, row in tqdm(self.metadata.iterrows()):
             waveform, sr = torchaudio.load(row['file_path'])
-            _, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length, is_torch=True)
+            _, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length)
             lengths.append(times_cqt.shape[0])
         return np.array(lengths)
 
@@ -206,7 +208,7 @@ class MapsDataset(Dataset):
         min_length = float('inf')
         for _, row in self.metadata.iterrows():
             waveform, sr = torchaudio.load(row['file_path'])
-            _, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length, is_torch=True)
+            _, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length)
             length = times_cqt.shape[0]
             if length < min_length:
                 min_length = length
@@ -216,7 +218,7 @@ class MapsDataset(Dataset):
         segment_indices = []
         for _, row in self.metadata.iterrows():
             waveform, sr = torchaudio.load(row['file_path'])
-            _, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length, is_torch=True)
+            _, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length)
             length = times_cqt.shape[0]
             segment_indices.append(length // self.min_length)
         return segment_indices
@@ -231,7 +233,7 @@ class MapsDataset(Dataset):
             row = self.metadata.iloc[audio_idx]
             try:
                 waveform, sr = torchaudio.load(row['file_path'])
-                M, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length, is_torch=True)
+                M, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length)
                 midi, onset, offset, _ = spec.midi_to_pianoroll(row['midi_path'], waveform, times_cqt, self.hop_length)
 
                 if self.use_H:
@@ -252,7 +254,7 @@ class MapsDataset(Dataset):
             row = self.metadata.iloc[idx]
             try:
                 waveform, sr = torchaudio.load(row['file_path'])
-                M, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length, is_torch=True)
+                M, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length)
                 midi, onset, offset, _ = spec.midi_to_pianoroll(row['midi_path'], waveform, times_cqt, self.hop_length, sr)
 
                 if self.use_H:
@@ -656,28 +658,39 @@ def permutation_match(W_new, W_init, rows=False):
         
     return W_new_rearranged
 
-def soft_permutation_match(W_new, W_init, rows=False):
-    if rows:
-        W_init = W_init.T
-        W_new = W_new.T
+def soft_permutation_match(tensor_new, tensor_init, rows=False):
+    
+    assert tensor_new.shape == tensor_init.shape, "Init and new tensors must have the same shape"
+    warnings.filterwarnings("ignore", message="Using a target size")
+    
+    batched = (len(tensor_new.shape)==3 and len(tensor_init.shape)==3)
+    
+    if batched:
+        batch_size = tensor_new.shape[0]
+        tensor_new_rearranged = torch.zeros_like(tensor_new)
 
-    # Compute the cost matrix using Euclidean distance
-    W_init_squared = torch.sum(W_init ** 2, dim=0, keepdim=True)
-    W_new_squared = torch.sum(W_new ** 2, dim=0, keepdim=True)
-    cost_matrix = W_init_squared + W_new_squared.T - 2 * torch.matmul(W_init.T, W_new)
-
-    # Detach the cost matrix from the computational graph before using scipy
-    cost_matrix_np = cost_matrix.detach().cpu().numpy()
-
-    # Use the Hungarian algorithm to find the optimal permutation
-    row_idx, col_idx = linear_sum_assignment(cost_matrix_np)
-
-    if rows:
-        W_new_rearranged = W_new[:, col_idx].T
+        for i in range(batch_size):
+            tensor_new_rearranged[i] = soft_permutation_match(tensor_new[i].clone(), tensor_init[i].clone(), rows)
+        return tensor_new_rearranged
+    
     else:
-        W_new_rearranged = W_new[:, col_idx]
+        if rows:
+            tensor_init = tensor_init.T
+            tensor_new = tensor_new.T
+        
+        assert tensor_init.dim() == 2 and tensor_new.dim() == 2, "Input tensors must be 2-dimensional"
 
-    return W_new_rearranged
+        # Compute the cost matrix using Euclidean distance
+        cost_matrix = torch.cdist(tensor_init.T.unsqueeze(0), tensor_new.T.unsqueeze(0), p=2).squeeze(0)
+
+        # Use the Hungarian algorithm to find the optimal permutation
+        row_idx, col_idx = linear_sum_assignment(cost_matrix.detach().cpu())
+        tensor_new_rearranged = tensor_new[:, col_idx]
+
+        if rows:
+            tensor_new_rearranged = tensor_new_rearranged.T
+
+        return tensor_new_rearranged
 
 def old_train(n_epochs, model, optimizer, loader, device, criterion):
     
@@ -769,15 +782,16 @@ def warmup_train(model, n_epochs, loader, optimizer, device, debug=False):
     
     return losses, W_hat, H_hat, H1    
  
-def train(model, loader, optimizer, criterion, device, epochs, valid_loader=None):
-    # run = wandb.init(
-    #     project=f"{model.__class__.__name__}_train",
-    #     config={
-    #         "learning_rate": optimizer.param_groups[-1]['lr'],
-    #         "batch_size": loader.batch_size,
-    #         "epochs": epochs,
-    #     },
-    # )
+def train(model, loader, optimizer, criterion, device, epochs, valid_loader=None, wandb=False):
+    if wandb:
+        run = wandb.init(
+            project=f"{model.__class__.__name__}_train",
+            config={
+                "learning_rate": optimizer.param_groups[-1]['lr'],
+                "batch_size": loader.batch_size,
+                "epochs": epochs,
+            },
+        )
     
     train_losses, valid_losses = [], []
     valid_loss_min = np.inf
@@ -792,15 +806,15 @@ def train(model, loader, optimizer, criterion, device, epochs, valid_loader=None
             M = M.to(device)
             H = H.to(device)
             
-            model.init_H(M[0], device=device)
-            print(f"M_gt: {M.shape}, H_gt: {H.shape}, W_model: {model.W0.shape}, H_model: {model.H0.shape}")
+            model.init_H(M, device=device)
             
             W_hat, H_hat, _ = model(M)
             
-            H_hat_r = soft_permutation_match(H_hat, model.H0, rows=True)
+            # H_hat_r = soft_permutation_match(H_hat, model.H0, rows=True)
             
             optimizer.zero_grad()
-            loss = criterion(H_hat_r, H[0])
+            loss = criterion(H_hat, H)
+            # loss = criterion(H_hat_r, H[0])
             loss.backward()
             optimizer.step()
             
@@ -809,7 +823,9 @@ def train(model, loader, optimizer, criterion, device, epochs, valid_loader=None
         train_loss /= len(loader)
         train_losses.append(train_loss)
         print(f"epoch {epoch}, loss = {train_loss:5f}")
-        # wandb.log({"training loss": train_loss})
+        
+        if wandb:
+            wandb.log({"training loss": train_loss})
     
         if valid_loader is not None:
         
@@ -819,18 +835,21 @@ def train(model, loader, optimizer, criterion, device, epochs, valid_loader=None
                 M = M.to(device)
                 H = H.to(device)
                 
-                model.init_H(M[0], device=device)
+                model.init_H(M, device=device)
                 
                 with torch.no_grad():
                     W_hat, H_hat, _ = model(M)
                 
-                H_hat_r = soft_permutation_match(H_hat, model.H0, rows=True)
-                loss = criterion(H_hat_r, H[0])
+                # H_hat_r = soft_permutation_match(H_hat, model.H0, rows=True)
+                # loss = criterion(H_hat_r, H[0])
+                loss = criterion(H_hat, H)
                 valid_loss += loss.item()
             
             valid_loss /= len(valid_loader)
             valid_losses.append(valid_loss)
-            # wandb.log({"valid loss": valid_loss})
+
+            if wandb:
+                wandb.log({"valid loss": valid_loss})
             
         if valid_loss <= valid_loss_min:
           print('validation loss decreased ({:.6f} --> {:.6f}).  Saving model ...'.format(

@@ -42,7 +42,7 @@ def init_W(folder_path=None, hop_length=128, bins_per_octave=36, n_bins=288, ver
             assert duration >= min_duration, f"Audio file {fname} is too short. Duration: {duration:.2f}s, Required: {min_duration:.2f}s"
             
             spec_cqt, _, freq = spec.cqt_spec(y, sample_rate=sr, hop_length=hop_length,
-                                    bins_per_octave=bins_per_octave, n_bins=n_bins, normalize=normalize, is_torch=True)
+                                    bins_per_octave=bins_per_octave, n_bins=n_bins, normalize=normalize)
             
             if len(fname) == 7:
                 note, octave = fname[0:2], int(fname[2])
@@ -83,27 +83,35 @@ def init_W(folder_path=None, hop_length=128, bins_per_octave=36, n_bins=288, ver
         print("Initialized W with synthetic data")
     return W, freqs, sr, true_freqs
 
-def init_H(l, t, W, M, n_init_steps, beta=1, device=None):
-    eps = 1e-8
-    H = torch.rand(l, t) + eps
+def init_H(l, t, W, M, n_init_steps, beta=1, device=None, batch_size=None):
+    eps = 1e-6
     
+    if batch_size is not None:
+        H = torch.rand(batch_size, l, t) + eps
+    else:
+        H = torch.rand(l, t) + eps
+        
     if device is not None:
         H = H.to(device)
         
     # create H with n iterations of MU
-    for i in range(n_init_steps):
+    for _ in range(n_init_steps):
+        
         Wh = W @ H
         Wh = torch.clamp(Wh, min=eps)
         Wh_beta_minus_2 = Wh ** (beta - 2)
         Wh_beta_minus_1 = Wh ** (beta - 1)
+        
+        if batch_size is not None:
+            Wt = W.transpose(1, 2)
+        else:
+            Wt = W.T
 
-        numerator = W.T @ (Wh_beta_minus_2 * M)
-        denominator = W.T @ Wh_beta_minus_1 + eps
+        numerator = Wt @ (Wh_beta_minus_2 * M)
+        denominator = Wt @ Wh_beta_minus_1 + eps
         denominator = torch.clamp(denominator, min=eps)
 
         H = H * (numerator / denominator)
-    
-    # H = H / H.max()
     
     return H
 

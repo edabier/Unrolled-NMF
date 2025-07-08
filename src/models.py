@@ -128,25 +128,25 @@ class Aw_cnn(nn.Module):
         self.relu  = nn.LeakyReLU()
         # We use a softplus activation to force > 0 output
         # and to avoid too big updates that could lead to exploding gradients
-        self.softplus = nn.Softplus() 
-        
-        # nn.init.kaiming_normal_(self.conv1.weight, mode='fan_in', nonlinearity='leaky_relu')
-        # nn.init.kaiming_normal_(self.conv2.weight, mode='fan_in', nonlinearity='leaky_relu')
-        # nn.init.kaiming_normal_(self.conv3.weight, mode='fan_in', nonlinearity='leaky_relu')
+        self.softplus = nn.Softplus()
 
     # W shape: (f,l)
     def forward(self, x):
         # print(f"Aw in: {x.shape}") # (1, f, l)
-        batch_size, f, l = x.shape
-        x = x.view(batch_size * l, 1, f) # (l, 1, f)
+        if (len(x.shape) == 3):
+            batch_size, f, l = x.shape
+        else:
+            f, l = x.shape
+            batch_size = 1
+        x = x.reshape(batch_size * l, 1, f) # (l, 1, f)
         y = self.relu(self.bn1(self.conv1(x)))     # (l, 64, f)
         y = self.relu(self.bn2(self.conv2(y)))     # (l, 32, f)
         y = self.softplus(self.conv3(y)) # (l, 1, f)
-        out = y.view(batch_size, l, f)
+        out = y.reshape(batch_size, l, f)
         out = out.permute(0,2,1)
         # print(f"Aw out: {out.shape}")
         return out
-   
+
     
 class Ah_cnn(nn.Module):
     """
@@ -163,11 +163,7 @@ class Ah_cnn(nn.Module):
         self.relu  = nn.LeakyReLU()
         # We use a softplus activation to force > 0 output
         # and to avoid too big updates that could lead to exploding gradients
-        self.softplus = nn.Softplus() 
-        
-        nn.init.kaiming_normal_(self.conv1.weight, mode='fan_in', nonlinearity='leaky_relu')
-        nn.init.kaiming_normal_(self.conv2.weight, mode='fan_in', nonlinearity='leaky_relu')
-        nn.init.kaiming_normal_(self.conv3.weight, mode='fan_in', nonlinearity='leaky_relu')
+        self.softplus = nn.Softplus()
 
     # H shape: (l,t)
     def forward(self, x):
@@ -362,7 +358,7 @@ class RALMU_block(nn.Module):
         learnable_beta (bool, optional): whether to learn the value of beta (default: ``False``)
         normalize (bool, optional): whether to normalize W and H (default: ``False``)
     """
-    def __init__(self, beta=1, eps=1e-6, shared_aw=None, shared_ah=None, use_ah=True, learnable_beta=False, normalize=False):
+    def __init__(self, beta=1, eps=1e-6, shared_aw=None, shared_ah=None, use_ah=True, learnable_beta=False, normalize=False, smaller_A=False):
         super().__init__()
         
         self.use_ah = use_ah
@@ -376,13 +372,17 @@ class RALMU_block(nn.Module):
             self.register_buffer("beta", torch.tensor(beta))
         self.eps = eps
         self.normalize = normalize
+        self.smaller_A = smaller_A
 
     def forward(self, M, W, H):
         
-        # Add channel dimension
-        W = W.unsqueeze(0)  # Shape: (1, f, l)
-        H = H.unsqueeze(0)  # Shape: (1, l, t)
+        is_batched = (len(M.shape) == 3)
         
+        # Add channel dimension
+        if not is_batched:
+            W = W.unsqueeze(0)  # Shape: (1, f, l)
+            H = H.unsqueeze(0)  # Shape: (1, l, t)
+            
         wh = W @ H + self.eps
 
         # Compute WH^(β - 2) * M
@@ -398,8 +398,16 @@ class RALMU_block(nn.Module):
         update_W = numerator_W / denominator_W
 
         # Apply learned transformation (Aw)
-        # Avoid going to zero by clamping
-        W_new = W * self.Aw(W) * update_W
+        
+        # Use octave splitting to inject only intra-octave notes in Aw
+        if self.smaller_A:
+            octave_W = [W[:, :, :4]] + [W[:, :, i+4:i+16] for i in range(0, 84, 12)]
+            accel_W = torch.cat([self.Aw(W_i)[0] for W_i in octave_W], 1)
+            W_new = W * accel_W * update_W
+        else:
+            W_new = W * self.Aw(W) * update_W
+            
+        # Avoid going to zero by clamping    
         W_new = torch.clamp(W_new, min=self.eps)
         
         if self.normalize:
@@ -418,17 +426,27 @@ class RALMU_block(nn.Module):
         update_H = numerator_H / denominator_H
 
         # Apply learned transformation (Ah)
-        # Avoid going to zero by clamping
         if self.use_ah:
-            H_new = H * self.Ah(H) * update_H
+            if self.smaller_A:
+                H_rows = [H[:, i:i+1, :] for i in range(0, 88)]
+                accel_H = torch.cat([self.Ah(H_i) for H_i in H_rows], 1)
+                H_new = H * accel_H * update_H
+            else:
+                H_new = H * self.Ah(H) * update_H
         else:
             H_new = H * update_H
+            
+        # Avoid going to zero by clamping
         H_new = torch.clamp(H_new, min=self.eps)
         
         if self.normalize:
             H_new = H_new / (H_new.sum(dim=1, keepdim=True) + self.eps)
 
-        return W_new.squeeze(0), H_new.squeeze(0)
+        if not is_batched:
+            W_new = W_new.squeeze(0)
+            H_new = H_new.squeeze(0)
+        
+        return W_new, H_new
 
     
 class RALMU(nn.Module):
@@ -451,7 +469,7 @@ class RALMU(nn.Module):
         normalize (bool, optional): whether to normalize W and H (default: ``False``)
     """
     
-    def __init__(self, l=88, eps=1e-6, beta=1, W_path=None, n_iter=10, n_init_steps=100, hidden=32, use_ah=True, shared=False, n_bins=288, bins_per_octave=36, verbose=False, normalize=False, return_layers=True):
+    def __init__(self, l=88, eps=1e-6, beta=1, W_path=None, n_iter=10, n_init_steps=100, hidden=32, use_ah=True, shared=False, n_bins=288, bins_per_octave=36, verbose=False, normalize=False, return_layers=True, batch_size=None, smaller_A=False):
         super().__init__()
         
         self.n_bins          = n_bins
@@ -476,26 +494,28 @@ class RALMU(nn.Module):
 
         # Unrolling layers
         self.layers = nn.ModuleList([
-            RALMU_block(eps=self.eps, shared_aw=shared_aw, shared_ah=shared_ah, use_ah=use_ah, normalize=self.normalize)
+            RALMU_block(eps=self.eps, shared_aw=shared_aw, shared_ah=shared_ah, use_ah=use_ah, normalize=self.normalize, smaller_A=smaller_A)
             for _ in range(self.n_iter)
         ])
         
         W0, freqs, sr, true_freqs = init.init_W(self.W_path, verbose=self.verbose)
+        if batch_size is not None:
+            W0 = W0.unsqueeze(0).expand(batch_size, -1, -1)
         self.freqs = freqs
         self.register_buffer("W0", W0)
             
     def init_H(self, M, device=None):
+        
+        batch_size = None
+        
         if len(M.shape) == 3:
             # Batched input (training phase)
-            _, f, t = M.shape
+            batch_size, f, t = M.shape
         elif len(M.shape) == 2:
             # Non-batched input (inference phase)
             f, t = M.shape
         
-        if device is not None:
-            H0 = init.init_H(self.l, t, self.W0, M, n_init_steps=self.n_init_steps, beta=self.beta, device=device)
-        else: 
-            H0 = init.init_H(self.l, t, self.W0, M, n_init_steps=self.n_init_steps, beta=self.beta) 
+        H0 = init.init_H(self.l, t, self.W0, M, n_init_steps=self.n_init_steps, beta=self.beta, device=device, batch_size=batch_size)
 
         self.register_buffer("H0", H0)
     

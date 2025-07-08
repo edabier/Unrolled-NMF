@@ -68,11 +68,11 @@ def vis_spectrogram(spec, times, frequencies, start, stop, min_freq, max_freq):
 """
 CQT Spectrogram
 """
-def cqt_spec(signal, sample_rate, hop_length=128, fmin=librosa.note_to_hz('A0'), bins_per_octave=36, n_bins=288, normalize=False, is_torch=False):
+def cqt_spec(signal, sample_rate, hop_length=128, fmin=librosa.note_to_hz('A0'), bins_per_octave=36, n_bins=288, normalize=False):
     """
     Computes the CQT spectrogram
     """
-    if is_torch:
+    if type(signal) == torch.Tensor:
         # Convert to mono if stereo
         signal = signal.squeeze()
         if signal.dim() > 1 and signal.shape[0] > 1:
@@ -84,18 +84,17 @@ def cqt_spec(signal, sample_rate, hop_length=128, fmin=librosa.note_to_hz('A0'),
         signal = signal.to(device)
         
         cqt_transform = nn_cqt.CQT2010v2(sr=sample_rate, hop_length=hop_length, fmin=fmin, n_bins=n_bins, bins_per_octave=bins_per_octave, verbose=False)
-        # cqt_load = time.time()
         
         with torch.no_grad():
             cqt = cqt_transform(signal)
             cqt = cqt.squeeze(0)
-        cqt_time = time.time()
-        # print(f"getting cqt: {cqt_time - cqt_load}")
             
         if normalize:
             cqt = cqt / torch.sum(torch.abs(cqt), dim=0, keepdim=True)
             
         # Convert magnitude to decibels
+        # cqt = librosa.cqt(y=signal.cpu().numpy(), sr=sample_rate, hop_length=hop_length, fmin=fmin, n_bins=n_bins, bins_per_octave=bins_per_octave)
+        # cqt = torch.from_numpy(cqt)
         spec = torch.abs(cqt)
         
     else:
@@ -119,7 +118,7 @@ def cqt_spec(signal, sample_rate, hop_length=128, fmin=librosa.note_to_hz('A0'),
     # Frequency axis
     frequencies = librosa.cqt_frequencies(n_bins=n_bins, fmin=fmin, bins_per_octave=bins_per_octave)
     
-    if is_torch:
+    if type(signal) == torch.Tensor:
         return spec, times, frequencies
     else:
         return torch.from_numpy(spec), times, frequencies
