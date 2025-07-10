@@ -7,7 +7,7 @@ import librosa
 import numpy as np
 import wandb
 import matplotlib.pyplot as plt
-import glob, os, warnings, operator
+import glob, os, warnings, math
 import mir_eval
 from tqdm import tqdm
 from scipy.optimize import linear_sum_assignment
@@ -195,15 +195,17 @@ class MapsDataset(Dataset):
         durations = []
         segment_indices = []
         time_steps = []
+        sr = self.metadata.iloc[0]["sampling_rate"]
+        self.fixed_length = math.ceil((self.fixed_length * sr) / self.hop_length)
+        
         for _, row in tqdm(self.metadata.iterrows()):
-            waveform, _ = torchaudio.load(row['file_path'])
-            sr = row["sampling_rate"]
+            waveform, _ = torchaudio.load(row.file_path)
             _, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length)
+            
             durations.append(waveform.shape[1]/sr)
-            segment_indices.append(times_cqt.shape[0])
+            segment_indices.append(-(times_cqt.shape[0] // -self.fixed_length))
             time_steps.append(times_cqt.shape[0])
             
-        self.fixed_length = int((self.fixed_length * sr) / self.hop_length)
         return np.array(durations), segment_indices, time_steps
 
     def __len__(self):
@@ -214,12 +216,16 @@ class MapsDataset(Dataset):
 
     def __getitem__(self, idx):
         if self.fixed_length is not None:
-            assert self.sort, "The dataset needs to be sorted to be able to use a fixed length, set sort to True"
-            audio_idx = 0
+            # assert self.sort, "The dataset needs to be sorted to be able to use a fixed length, set sort to True"
+            # audio_idx = 0
             
-            while idx >= self.segment_indices[audio_idx]:
-                idx -= self.segment_indices[audio_idx]
-                audio_idx += 1
+            # while idx >= self.segment_indices[audio_idx]:
+            #     idx -= self.segment_indices[audio_idx]
+            #     audio_idx += 1
+            
+            cumulative_indices = np.cumsum(self.segment_indices)
+            file_index = np.searchsorted(cumulative_indices, idx, side='right')
+            audio_idx = idx - cumulative_indices[file_index - 1] if file_index > 0 else idx
 
             row = self.metadata.iloc[audio_idx]
             try:
