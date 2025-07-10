@@ -47,18 +47,24 @@ if __name__ == '__main__':
     print("Loading the dataset...")
     maps = music.Maps("/tsi/mir/maps")
     metadata = maps.pdf_metadata
-    dataset = utils.MapsDataset(metadata, fixed_length=False, subset=subset)
+    dataset = utils.MapsDataset(metadata, fixed_length=False, subset=0.01, verbose=True, mean_filter=True)
     
-    generator = torch.Generator(device=dev) 
-    train_set, valid_set = torch.utils.data.random_split(dataset, [split, 1-split], generator=generator)   
-    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=False)
-    valid_loader = DataLoader(valid_set, batch_size=batch_size, shuffle=False)
+    sampler = utils.SequentialBatchSampler(dataset, batch_size)
+    data_loader = DataLoader(dataset, batch_sampler=sampler, collate_fn=utils.collate_fn)
+    train_loader = []
+    valid_loader = []
+
+    for i, batch in enumerate(data_loader):
+        if i % 5 == 0:  # Every 5th batch goes to validation
+            valid_loader.append(batch)
+        else:
+            train_loader.append(batch)
     print(f"Train dataset: {len(train_loader)}, valid dataset: {len(valid_loader)}")
     
     ##########################################################
     print("Loading the model...")
     W_path = 'AMT/Unrolled-NMF/test-data/synth-single-notes'
-    ralmu = models.RALMU(l=88, beta=1, W_path=W_path, n_iter=n_iter, n_init_steps=1, hidden=8, shared=True, return_layers=False)
+    ralmu = models.RALMU(l=88, beta=1, W_path=W_path, n_iter=10, n_init_steps=1, hidden=8, shared=True, return_layers=False, batch_size=batch_size, smaller_A=True)
     
     
     ##########################################################

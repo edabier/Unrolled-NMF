@@ -83,10 +83,10 @@ def cqt_spec(signal, sample_rate, hop_length=128, fmin=librosa.note_to_hz('A0'),
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         signal = signal.to(device)
         
-        cqt_transform = nn_cqt.CQT2010v2(sr=sample_rate, hop_length=hop_length, fmin=fmin, n_bins=n_bins, bins_per_octave=bins_per_octave, verbose=False)
+        cqt_transform = nn_cqt.CQT2010v2(sr=sample_rate, hop_length=hop_length, fmin=fmin, n_bins=n_bins, bins_per_octave=bins_per_octave, verbose=False, output_format='Magnitude')
         
         with torch.no_grad():
-            cqt = cqt_transform(signal)
+            cqt = cqt_transform(signal).to(torch.float16)
             cqt = cqt.squeeze(0)
             
         if normalize:
@@ -95,7 +95,6 @@ def cqt_spec(signal, sample_rate, hop_length=128, fmin=librosa.note_to_hz('A0'),
         # Convert magnitude to decibels
         # cqt = librosa.cqt(y=signal.cpu().numpy(), sr=sample_rate, hop_length=hop_length, fmin=fmin, n_bins=n_bins, bins_per_octave=bins_per_octave)
         # cqt = torch.from_numpy(cqt)
-        spec = torch.abs(cqt)
         
     else:
         signal  = signal.squeeze().numpy()
@@ -108,10 +107,10 @@ def cqt_spec(signal, sample_rate, hop_length=128, fmin=librosa.note_to_hz('A0'),
             cqt = np.apply_along_axis(lambda x: x / np.sum(np.abs(x)), axis=0, arr=cqt)
 
         # Convert magnitude to decibels
-        spec = np.abs(cqt)
+        cqt = np.abs(cqt)
     
     # Time axis
-    num_frames  = spec.shape[1]
+    num_frames  = cqt.shape[1]
     frame_time  = hop_length / sample_rate
     times       = np.arange(num_frames) * frame_time
     
@@ -119,9 +118,9 @@ def cqt_spec(signal, sample_rate, hop_length=128, fmin=librosa.note_to_hz('A0'),
     frequencies = librosa.cqt_frequencies(n_bins=n_bins, fmin=fmin, bins_per_octave=bins_per_octave)
     
     if type(signal) == torch.Tensor:
-        return spec, times, frequencies
+        return cqt, times, frequencies
     else:
-        return torch.from_numpy(spec), times, frequencies
+        return torch.from_numpy(cqt), times, frequencies
 
 def max_columns(W):
     max_values, _ = torch.max(W, dim=0)
@@ -295,7 +294,7 @@ def midi_to_pianoroll(midi_path, waveform, times, hop_length, sr=16000):
     onsets_tensor = torch.from_numpy(onset_matrix).float()
     offsets_tensor = torch.from_numpy(offset_matrix).float()
 
-    return torch.from_numpy(piano_roll), onsets_tensor, offsets_tensor, times
+    return torch.from_numpy(piano_roll).to(torch.float16), onsets_tensor, offsets_tensor, times
 
 def vis_midi(midi_mat, times, start, stop):
     start_idx = np.searchsorted(times, start)

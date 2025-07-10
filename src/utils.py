@@ -7,7 +7,7 @@ import librosa
 import numpy as np
 import wandb
 import matplotlib.pyplot as plt
-import glob, os, warnings
+import glob, os, warnings, operator
 import mir_eval
 from tqdm import tqdm
 from scipy.optimize import linear_sum_assignment
@@ -165,38 +165,44 @@ class MapsDataset(Dataset):
         subset (float, optional): The subset of files to include in the dataset. If None, all files are used (default: None).
         mean_filter (bool, optional): Whether to filter the dataset to keep only files with length > mean(length) (default: `False`)
     """
-    def __init__(self, metadata, hop_length=128, use_H=False, fixed_length=True, subset=None, mean_filter=False, verbose=False):
+    def __init__(self, metadata, hop_length=128, use_H=False, fixed_length=None, subset=None, sort=True, filter=False, verbose=False):
         assert 'file_path' in metadata.columns and 'midi_path' in metadata.columns, "Metadata should contain 'file_path' and 'midi_path' columns."
 
         self.metadata = metadata.copy()
         self.hop_length = hop_length
         self.use_H = use_H
         self.fixed_length = fixed_length
+        self.sort = sort
 
         if subset is not None:
             num_files = int(len(metadata) * subset)
             self.metadata = self.metadata.iloc[:num_files]
         
-        if verbose:
-            print("Computing the length of files...")
-        self.lengths = self._compute_lengths()
-        self.metadata.loc[:, 'length'] = self.lengths
-        self.metadata = self.metadata.sort_values(by='length')
+        if self.sort:
+            if verbose:
+                print("Computing the length of files...")
+            self.durations, self.segment_indices, self.time_steps = self._compute_lengths()
+            self.metadata.loc[:, 'duration'] = self.durations
+            self.metadata = self.metadata.sort_values(by='duration')
+            
+            if filter:
+                self.metadata = self.metadata[self.metadata['time_steps'] > self.fixed_length].reset_index(drop=True)
         
-        if mean_filter:
-            mean_length = self.metadata['length'].mean()
-            self.metadata = self.metadata[self.metadata['length'] > mean_length].reset_index(drop=True)
-        
-        self.min_length = self.metadata['length'].min() if fixed_length else None
-        self.segment_indices = self._precompute_segment_indices() if fixed_length else None
+            self.min_length = fixed_length
     
     def _compute_lengths(self):
-        lengths = []
+        durations = []
+        segment_indices = []
+        time_steps = []
         for _, row in tqdm(self.metadata.iterrows()):
             waveform, sr = torchaudio.load(row['file_path'])
             _, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length)
-            lengths.append(times_cqt.shape[0])
-        return np.array(lengths)
+            durations.append(waveform.shape[1]/sr)
+            segment_indices.append(times_cqt.shape[0])
+            time_steps.append(times_cqt.shape[0])
+            
+        self.fixed_length = int(self.fixed_length * sr)
+        return np.array(durations), segment_indices, time_steps
 
     def __len__(self):
         if self.fixed_length:
@@ -204,28 +210,11 @@ class MapsDataset(Dataset):
         else:
             return len(self.metadata)
 
-    def _determine_min_length(self):
-        min_length = float('inf')
-        for _, row in self.metadata.iterrows():
-            waveform, sr = torchaudio.load(row['file_path'])
-            _, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length)
-            length = times_cqt.shape[0]
-            if length < min_length:
-                min_length = length
-        return min_length
-
-    def _precompute_segment_indices(self):
-        segment_indices = []
-        for _, row in self.metadata.iterrows():
-            waveform, sr = torchaudio.load(row['file_path'])
-            _, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length)
-            length = times_cqt.shape[0]
-            segment_indices.append(length // self.min_length)
-        return segment_indices
-
     def __getitem__(self, idx):
-        if self.fixed_length:
+        if self.fixed_length is not None:
+            assert self.sort, "The dataset needs to be sorted to be able to use a fixed length, set sort to True"
             audio_idx = 0
+            
             while idx >= self.segment_indices[audio_idx]:
                 idx -= self.segment_indices[audio_idx]
                 audio_idx += 1
@@ -240,8 +229,8 @@ class MapsDataset(Dataset):
                     active_midi = [i for i in range(88) if (midi[i, :] > 0).any().item()]
                     midi = init.MIDI_to_H(midi, active_midi, onset, offset)
 
-                start_idx = idx * self.min_length
-                end_idx = start_idx + self.min_length
+                start_idx = idx * self.fixed_length
+                end_idx = start_idx + self.fixed_length
 
                 M_segment = M[:, start_idx:end_idx]
                 midi_segment = midi[:, start_idx:end_idx]
@@ -691,61 +680,11 @@ def soft_permutation_match(tensor_new, tensor_init, rows=False):
             tensor_new_rearranged = tensor_new_rearranged.T
 
         return tensor_new_rearranged
-
-def old_train(n_epochs, model, optimizer, loader, device, criterion):
     
-    model.train()
-    model.to(device=device)
-    losses = []
-    # monitor_reconstruct = []
-    # monitor_sparsity    = []
-    
-    model.W_cache = {}
-    model.H_cache = {}
-    
-    for epoch in range(n_epochs):
-        inter_loss = []
-        for M, midi in loader:
-            
-            M = M.to(device)
-            midi = midi.to(device)
-            model.init_WH(M)
-
-            W_hat, H_hat, M_hat = model(M)
-            # assert W_hat is None or H_hat is None, "W or H got to None..."
-            _, notes, _, _ = init.W_to_pitch(W_hat, model.freqs, H=H_hat)
-            midi_hat, active_midi_hat = init.WH_to_MIDI(W_hat, H_hat, notes)
-            M = M.squeeze(0)
-            midi = midi.squeeze(0)
-            active_midi = [i for i in range(88) if (midi[i,:]>0).any().item()]
-            # print(midi_hat[active_midi,:].min(), midi_hat[active_midi,:].max())
-            
-            # loss, monitor_loss1, monitor_loss2 = compute_loss(M, M_hat, midi, midi_hat, H_hat)
-            # losses.append(loss.detach().numpy())
-            # monitor_reconstruct.append(monitor_loss1)
-            # monitor_sparsity.append(monitor_loss2)
-                    
-            # nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
-            
-            optimizer.zero_grad()
-            loss = criterion(midi_hat[active_midi,:], midi[active_midi,:])
-            inter_loss.append(loss.detach().numpy())
-            loss.backward()
-
-            for param in model.parameters():
-                print(f"Grad norm: {param.grad.norm().item()}")
-                # if param.grad is not None:
-                #     print(f"Grad norm: {param.grad.norm().item()}")
-                # if param.grad < 1e-1:
-                    # print(f"Grad norm: {param.grad.norm().item()}")
-                
-            optimizer.step()
-            
-            # print("------------ Next audio file... ------------")
-        losses.append(np.mean(inter_loss))
-        print(f"============= Epoch {epoch+1}, Loss: {np.mean(inter_loss)} =============")
-    
-    return losses#, monitor_reconstruct, monitor_sparsity
+def spectral_flatness(spec, log_val=1):
+    geometric_mean = torch.exp(torch.mean(torch.log(log_val + spec), dim=0))
+    arithmetic_mean = torch.mean(spec, dim=0)
+    return geometric_mean / arithmetic_mean
 
 def warmup_train(model, n_epochs, loader, optimizer, device, debug=False):
     losses = []
@@ -808,6 +747,10 @@ def train(model, loader, optimizer, criterion, device, epochs, valid_loader=None
             
             W_hat, H_hat, _ = model(M, device=device)
             
+            # sfm = spectral_flatness(W_hat, log_val=1e-5)
+            # harmonicity = torch.mean(sfm)
+            # print(f"Harmonicity score: {harmonicity}")
+            
             # H_hat_r = soft_permutation_match(H_hat, model.H0, rows=True)
             
             optimizer.zero_grad()
@@ -832,8 +775,6 @@ def train(model, loader, optimizer, criterion, device, epochs, valid_loader=None
                 
                 M = M.to(device)
                 H = H.to(device)
-                
-                model.init_H(M, device=device)
                 
                 with torch.no_grad():
                     W_hat, H_hat, _ = model(M)

@@ -116,6 +116,7 @@ class Ah(nn.Module):
 class Aw_cnn(nn.Module):
     """
     Defining a 1D CNN (frequency axis) for Aw()
+    reshapes input of shape (batch, f, l) to (batch, 1, f*l) and applies convolution to f*l
     1 channel -> 32 ch kernel=5 pad=2 -> 1 ch kernel=3 pad=1
     """
     def __init__(self, in_channels=1, hidden_channels=2):
@@ -132,16 +133,17 @@ class Aw_cnn(nn.Module):
 
     # W shape: (f,l)
     def forward(self, x):
-        # print(f"Aw in: {x.shape}") # (1, f, l)
+        # print(f"Aw in: {x.shape}")                   # (batch, f, l)
         if (len(x.shape) == 3):
             batch_size, f, l = x.shape
         else:
             f, l = x.shape
             batch_size = 1
-        x = x.reshape(batch_size * l, 1, f) # (l, 1, f)
-        y = self.relu(self.bn1(self.conv1(x)))     # (l, 64, f)
-        y = self.relu(self.bn2(self.conv2(y)))     # (l, 32, f)
-        y = self.softplus(self.conv3(y)) # (l, 1, f)
+        x = x.reshape(batch_size, 1, f*l)           # (batch, 1, f*l)
+        # print(f"Aw reshaped: {x.shape}")
+        y = self.relu(self.bn1(self.conv1(x)))      # (batch, 64, f*l)
+        y = self.relu(self.bn2(self.conv2(y)))      # (batch, 32, f*l)
+        y = self.softplus(self.conv3(y))            # (batch, 1, f*l)
         out = y.reshape(batch_size, l, f)
         out = out.permute(0,2,1)
         # print(f"Aw out: {out.shape}")
@@ -151,6 +153,7 @@ class Aw_cnn(nn.Module):
 class Ah_cnn(nn.Module):
     """
     Defining a 1D CNN (time axis) for Ah()
+    reshapes input of shape (batch, l, t) to (batch, 1, l*t) and applies convolution to l*t
     1 channel -> 32 ch kernel=5 pad=2 -> 1 ch kernel=3 pad=1
     """
     def __init__(self, in_channels=1, hidden_channels=32):
@@ -167,14 +170,18 @@ class Ah_cnn(nn.Module):
 
     # H shape: (l,t)
     def forward(self, x):
-        # print(f"Ah in: {x.shape}")      # (batch_size, l, t)
-        batch_size, l, t = x.shape
-        x = x.view(batch_size * l, 1, t)  # (batch_size * l, 1, t)
-        y = self.relu(self.bn1(self.conv1(x)))      # (batch_size * l, 64, t)
-        y = self.relu(self.bn2(self.conv2(y)))      # (batch_size * l, 32, t)
-        y = self.relu(self.conv3(y))      # (batch_size * l, 1, t)
-        out = self.softplus(y)            # (batch_size * l, 1, t)
-        out = out.view(batch_size, l, t)  #(batch_size, l, t)
+        # print(f"Ah in: {x.shape}")            # (batch, l, t)
+        if (len(x.shape) == 3):
+            batch_size, l, t = x.shape
+        else:
+            l, t = x.shape
+            batch_size = 1
+        x = x.view(batch_size * l, 1, t)        # (batch, 1, t*l)
+        y = self.relu(self.bn1(self.conv1(x)))  # (batch, 64, t*l)
+        y = self.relu(self.bn2(self.conv2(y)))  # (batch, 32, t*l)
+        y = self.relu(self.conv3(y))            # (batch, 1, t*l)
+        out = self.softplus(y)                  # (batch, 1, t*l)
+        out = out.view(batch_size, l, t)        # (batch, l, t*l)
         # print(f"Ah out: {out.shape}")
         return out   
    
@@ -497,12 +504,6 @@ class RALMU(nn.Module):
             RALMU_block(eps=self.eps, shared_aw=shared_aw, shared_ah=shared_ah, use_ah=use_ah, normalize=self.normalize, smaller_A=smaller_A)
             for _ in range(self.n_iter)
         ])
-        
-        W0, freqs, sr, true_freqs = init.init_W(self.W_path, verbose=self.verbose)
-        if batch_size is not None:
-            W0 = W0.unsqueeze(0).expand(batch_size, -1, -1)
-        self.freqs = freqs
-        self.register_buffer("W0", W0)
             
     def init_H(self, M, device=None):
         
@@ -521,12 +522,6 @@ class RALMU(nn.Module):
     
     def forward(self, M, device=None):
         
-        # assert hasattr(self, 'H0'), "Please run init_H, H0 is not initialized"
-        assert hasattr(self, 'W0'), "Model has no initialization for W"
-        
-        W = self.W0
-        # H = self.H0
-        
         batch_size=None
         if len(M.shape) == 3:
             # Batched input (training phase)
@@ -534,7 +529,11 @@ class RALMU(nn.Module):
         elif len(M.shape) == 2:
             # Non-batched input (inference phase)
             _, t = M.shape
-        H = init.init_H(self.l, t, self.W0, M, n_init_steps=self.n_init_steps, beta=self.beta, device=device, batch_size=batch_size)
+            
+        W, _, _, _ = init.init_W(self.W_path, verbose=self.verbose)
+        if batch_size is not None:
+            W = W.unsqueeze(0).expand(batch_size, -1, -1)
+        H = init.init_H(self.l, t, W, M, n_init_steps=self.n_init_steps, beta=self.beta, device=device, batch_size=batch_size)
         
         if self.return_layers:
             W_layers = []
