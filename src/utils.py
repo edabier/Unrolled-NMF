@@ -181,8 +181,9 @@ class MapsDataset(Dataset):
         if self.sort:
             if verbose:
                 print("Computing the length of files...")
-            self.durations, self.segment_indices, self.time_steps = self._compute_lengths()
-            self.metadata.loc[:, 'duration'] = self.durations
+            durations, self.segment_indices, time_steps = self._compute_lengths()
+            self.metadata.loc[:, 'duration'] = durations
+            self.metadata.loc[:, 'time_steps'] = time_steps
             self.metadata = self.metadata.sort_values(by='duration')
             
             if filter:
@@ -195,13 +196,14 @@ class MapsDataset(Dataset):
         segment_indices = []
         time_steps = []
         for _, row in tqdm(self.metadata.iterrows()):
-            waveform, sr = torchaudio.load(row['file_path'])
+            waveform, _ = torchaudio.load(row['file_path'])
+            sr = row["sampling_rate"]
             _, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length)
             durations.append(waveform.shape[1]/sr)
             segment_indices.append(times_cqt.shape[0])
             time_steps.append(times_cqt.shape[0])
             
-        self.fixed_length = int(self.fixed_length * sr)
+        self.fixed_length = int((self.fixed_length * sr) / self.hop_length)
         return np.array(durations), segment_indices, time_steps
 
     def __len__(self):
