@@ -120,13 +120,13 @@ class Aw_cnn(nn.Module):
     reshapes input of shape (batch, f, l) to (batch, 1, f*l) and applies convolution to f*l
     1 channel -> 32 ch kernel=5 pad=2 -> 1 ch kernel=3 pad=1
     """
-    def __init__(self, in_channels=1, hidden_channels=2):
+    def __init__(self, in_channels=1, hidden_channels=2, dtype=None):
         super(Aw_cnn, self).__init__()
-        self.conv1 = nn.Conv1d(in_channels, hidden_channels*2, kernel_size=5, padding=5 // 2)
-        self.conv2 = nn.Conv1d(hidden_channels*2, hidden_channels, kernel_size=3, padding=3 // 2)
-        self.conv3 = nn.Conv1d(hidden_channels, 1, kernel_size=3, padding=1)
-        self.bn1 = nn.BatchNorm1d(hidden_channels*2)
-        self.bn2 = nn.BatchNorm1d(hidden_channels)
+        self.conv1 = nn.Conv1d(in_channels, hidden_channels*2, kernel_size=5, padding=5 // 2, dtype=dtype)
+        self.conv2 = nn.Conv1d(hidden_channels*2, hidden_channels, kernel_size=3, padding=3 // 2, dtype=dtype)
+        self.conv3 = nn.Conv1d(hidden_channels, 1, kernel_size=3, padding=1, dtype=dtype)
+        self.bn1 = nn.BatchNorm1d(hidden_channels*2, dtype=dtype)
+        self.bn2 = nn.BatchNorm1d(hidden_channels, dtype=dtype)
         self.relu  = nn.LeakyReLU()
         # We use a softplus activation to force > 0 output
         # and to avoid too big updates that could lead to exploding gradients
@@ -141,10 +141,11 @@ class Aw_cnn(nn.Module):
             f, l = x.shape
             batch_size = 1
         x = x.reshape(batch_size, 1, f*l)           # (batch, 1, f*l)
-        plt.imshow(x[0], cmap='Reds')
-        plt.title("Reshaped tensor")
-        plt.colorbar()
-        plt.show()
+        # x = x.transpose(1, 2).reshape(batch_size, 1, f*l).transpose(1, 2)
+        # plt.imshow(x[0], cmap='Reds')
+        # plt.title("Reshaped tensor Aw")
+        # plt.colorbar()
+        # plt.show()
         print(f"Aw reshaped: {x.shape}")
         y = self.relu(self.bn1(self.conv1(x)))      # (batch, 64, f*l)
         y = self.relu(self.bn2(self.conv2(y)))      # (batch, 32, f*l)
@@ -161,13 +162,13 @@ class Ah_cnn(nn.Module):
     reshapes input of shape (batch, l, t) to (batch, 1, l*t) and applies convolution to l*t
     1 channel -> 32 ch kernel=5 pad=2 -> 1 ch kernel=3 pad=1
     """
-    def __init__(self, in_channels=1, hidden_channels=32):
+    def __init__(self, in_channels=1, hidden_channels=32, dtype=None):
         super(Ah_cnn, self).__init__()
-        self.conv1 = nn.Conv1d(in_channels, hidden_channels*2, kernel_size=5, padding=5 // 2)
-        self.conv2 = nn.Conv1d(hidden_channels*2, hidden_channels, kernel_size=3, padding=3 // 2)
-        self.conv3 = nn.Conv1d(hidden_channels, 1, kernel_size=3, padding=1)
-        self.bn1 = nn.BatchNorm1d(hidden_channels*2)
-        self.bn2 = nn.BatchNorm1d(hidden_channels)
+        self.conv1 = nn.Conv1d(in_channels, hidden_channels*2, kernel_size=5, padding=5 // 2, dtype=dtype)
+        self.conv2 = nn.Conv1d(hidden_channels*2, hidden_channels, kernel_size=3, padding=3 // 2, dtype=dtype)
+        self.conv3 = nn.Conv1d(hidden_channels, 1, kernel_size=3, padding=1, dtype=dtype)
+        self.bn1 = nn.BatchNorm1d(hidden_channels*2, dtype=dtype)
+        self.bn2 = nn.BatchNorm1d(hidden_channels, dtype=dtype)
         self.relu  = nn.LeakyReLU()
         # We use a softplus activation to force > 0 output
         # and to avoid too big updates that could lead to exploding gradients
@@ -182,10 +183,11 @@ class Ah_cnn(nn.Module):
             l, t = x.shape
             batch_size = 1
         x = x.view(batch_size * l, 1, t)        # (batch, 1, t*l)
-        plt.imshow(x[0], cmap='Reds')
-        plt.title("Reshaped tensor")
-        plt.colorbar()
-        plt.show()
+        # x = x.reshape(batch_size, 1, l*t)
+        # plt.imshow(x[0], cmap='Reds')
+        # plt.title("Reshaped tensor Ah")
+        # plt.colorbar()
+        # plt.show()
         print(f"Ah reshaped: {x.shape}")
         y = self.relu(self.bn1(self.conv1(x)))  # (batch, 64, t*l)
         y = self.relu(self.bn2(self.conv2(y)))  # (batch, 32, t*l)
@@ -375,13 +377,13 @@ class RALMU_block(nn.Module):
         learnable_beta (bool, optional): whether to learn the value of beta (default: ``False``)
         normalize (bool, optional): whether to normalize W and H (default: ``False``)
     """
-    def __init__(self, beta=1, eps=1e-6, shared_aw=None, shared_ah=None, use_ah=True, learnable_beta=False, normalize=False, smaller_A=False):
+    def __init__(self, beta=1, eps=1e-6, shared_aw=None, shared_ah=None, use_ah=True, learnable_beta=False, normalize=False, smaller_A=False, dtype=None):
         super().__init__()
         
         self.use_ah = use_ah
-        self.Aw = shared_aw if shared_aw is not None else Aw_cnn()
+        self.Aw = shared_aw if shared_aw is not None else Aw_cnn(dtype=dtype)
         if self.use_ah:
-            self.Ah = shared_ah if shared_ah is not None else Ah_cnn()
+            self.Ah = shared_ah if shared_ah is not None else Ah_cnn(dtype=dtype)
             
         if learnable_beta:
             self.beta = nn.Parameter(torch.tensor(beta)) 
@@ -486,7 +488,7 @@ class RALMU(nn.Module):
         normalize (bool, optional): whether to normalize W and H (default: ``False``)
     """
     
-    def __init__(self, l=88, eps=1e-6, beta=1, W_path=None, n_iter=10, n_init_steps=100, hidden=32, use_ah=True, shared=False, n_bins=288, bins_per_octave=36, verbose=False, normalize=False, return_layers=True, batch_size=None, smaller_A=False):
+    def __init__(self, l=88, eps=1e-6, beta=1, W_path=None, n_iter=10, n_init_steps=100, hidden=32, use_ah=True, shared=False, n_bins=288, bins_per_octave=36, verbose=False, normalize=False, return_layers=True, batch_size=None, smaller_A=False, dtype=None):
         super().__init__()
         
         self.n_bins          = n_bins
@@ -503,15 +505,15 @@ class RALMU(nn.Module):
         self.normalize      = normalize
         self.return_layers  = return_layers
 
-        shared_aw = Aw_cnn(hidden_channels=hidden) if self.shared else None
+        shared_aw = Aw_cnn(hidden_channels=hidden, dtype=dtype) if self.shared else None
         if use_ah:
-            shared_ah = Ah_cnn(hidden_channels=hidden) if self.shared else None
+            shared_ah = Ah_cnn(hidden_channels=hidden, dtype=dtype) if self.shared else None
         else:
             shared_ah = None
 
         # Unrolling layers
         self.layers = nn.ModuleList([
-            RALMU_block(eps=self.eps, shared_aw=shared_aw, shared_ah=shared_ah, use_ah=use_ah, normalize=self.normalize, smaller_A=smaller_A)
+            RALMU_block(eps=self.eps, shared_aw=shared_aw, shared_ah=shared_ah, use_ah=use_ah, normalize=self.normalize, smaller_A=smaller_A, dtype=dtype)
             for _ in range(self.n_iter)
         ])
             
@@ -543,6 +545,7 @@ class RALMU(nn.Module):
         W, _, _, _ = init.init_W(self.W_path, verbose=self.verbose)
         if batch_size is not None:
             W = W.unsqueeze(0).expand(batch_size, -1, -1)
+        
         H = init.init_H(self.l, t, W, M, n_init_steps=self.n_init_steps, beta=self.beta, device=device, batch_size=batch_size)
         
         if self.return_layers:

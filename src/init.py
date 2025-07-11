@@ -87,9 +87,9 @@ def init_H(l, t, W, M, n_init_steps, beta=1, device=None, batch_size=None):
     eps = 1e-6
     
     if batch_size is not None:
-        H = torch.rand(batch_size, l, t) + eps
+        H = torch.rand(batch_size, l, t, dtype=torch.float16) + eps
     else:
-        H = torch.rand(l, t) + eps
+        H = torch.rand(l, t, dtype=torch.float16) + eps
         
     if device is not None:
         H = H.to(device)
