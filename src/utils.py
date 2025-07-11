@@ -123,10 +123,11 @@ class SequentialBatchSampler(Sampler):
 
     def __iter__(self):
         indices = list(range(len(self.data_source)))
+        print(f"Sequential indices: {indices}")
         # Split indices into batches
-        batches = [indices[i:i + self.batch_size] for i in range(0, len(indices), self.batch_size)]
+        self.batches = [indices[i:i + self.batch_size] for i in range(0, len(indices), self.batch_size)]
         # Flatten the list of batches
-        return iter(batches)
+        return iter(self.batches)
 
     def __len__(self):
         return len(self.data_source) // self.batch_size
@@ -140,8 +141,11 @@ def pad_by_repeating(tensor, max_length):
     
 def collate_fn(batch):
     # Separate audio and MIDI files
-    audio_files = [item[0] for item in batch]
-    midi_files = [item[1] for item in batch]
+    audio_files = [item[0] for item in batch if item[0].size(1) > 0]
+    midi_files = [item[1] for item in batch if item[1].size(1) > 0]
+    
+    if not audio_files or not midi_files:
+        return torch.tensor([]), torch.tensor([])
     
     max_audio_length = max(audio.size(1) for audio in audio_files)
     max_midi_length = max(midi.size(1) for midi in midi_files)
@@ -216,12 +220,6 @@ class MapsDataset(Dataset):
 
     def __getitem__(self, idx):
         if self.fixed_length is not None:
-            # assert self.sort, "The dataset needs to be sorted to be able to use a fixed length, set sort to True"
-            # audio_idx = 0
-            
-            # while idx >= self.segment_indices[audio_idx]:
-            #     idx -= self.segment_indices[audio_idx]
-            #     audio_idx += 1
             
             cumulative_indices = np.cumsum(self.segment_indices)
             file_index = np.searchsorted(cumulative_indices, idx, side='right')
@@ -242,6 +240,8 @@ class MapsDataset(Dataset):
 
                 M_segment = M[:, start_idx:end_idx]
                 midi_segment = midi[:, start_idx:end_idx]
+                
+                print(f"Get_item shapes, M: {M_segment.shape}, H: {midi_segment.shape}")
 
                 return M_segment, midi_segment
             except Exception as e:

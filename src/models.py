@@ -2,6 +2,7 @@ import torch.nn as nn
 import torchaudio
 import numpy as np
 import torch
+import matplotlib.pyplot as plt
 import os
 import librosa
 import time
@@ -133,20 +134,24 @@ class Aw_cnn(nn.Module):
 
     # W shape: (f,l)
     def forward(self, x):
-        # print(f"Aw in: {x.shape}")                   # (batch, f, l)
+        print(f"Aw in: {x.shape}")                   # (batch, f, l)
         if (len(x.shape) == 3):
             batch_size, f, l = x.shape
         else:
             f, l = x.shape
             batch_size = 1
         x = x.reshape(batch_size, 1, f*l)           # (batch, 1, f*l)
-        # print(f"Aw reshaped: {x.shape}")
+        plt.imshow(x[0], cmap='Reds')
+        plt.title("Reshaped tensor")
+        plt.colorbar()
+        plt.show()
+        print(f"Aw reshaped: {x.shape}")
         y = self.relu(self.bn1(self.conv1(x)))      # (batch, 64, f*l)
         y = self.relu(self.bn2(self.conv2(y)))      # (batch, 32, f*l)
         y = self.softplus(self.conv3(y))            # (batch, 1, f*l)
         out = y.reshape(batch_size, l, f)
         out = out.permute(0,2,1)
-        # print(f"Aw out: {out.shape}")
+        print(f"Aw out: {out.shape}")
         return out
 
     
@@ -170,19 +175,24 @@ class Ah_cnn(nn.Module):
 
     # H shape: (l,t)
     def forward(self, x):
-        # print(f"Ah in: {x.shape}")            # (batch, l, t)
+        print(f"Ah in: {x.shape}")            # (batch, l, t)
         if (len(x.shape) == 3):
             batch_size, l, t = x.shape
         else:
             l, t = x.shape
             batch_size = 1
         x = x.view(batch_size * l, 1, t)        # (batch, 1, t*l)
+        plt.imshow(x[0], cmap='Reds')
+        plt.title("Reshaped tensor")
+        plt.colorbar()
+        plt.show()
+        print(f"Ah reshaped: {x.shape}")
         y = self.relu(self.bn1(self.conv1(x)))  # (batch, 64, t*l)
         y = self.relu(self.bn2(self.conv2(y)))  # (batch, 32, t*l)
         y = self.relu(self.conv3(y))            # (batch, 1, t*l)
         out = self.softplus(y)                  # (batch, 1, t*l)
         out = out.view(batch_size, l, t)        # (batch, l, t*l)
-        # print(f"Ah out: {out.shape}")
+        print(f"Ah out: {out.shape}")
         return out   
    
    
