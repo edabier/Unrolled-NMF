@@ -123,7 +123,6 @@ class SequentialBatchSampler(Sampler):
 
     def __iter__(self):
         indices = list(range(len(self.data_source)))
-        print(f"Sequential indices: {indices}")
         # Split indices into batches
         self.batches = [indices[i:i + self.batch_size] for i in range(0, len(indices), self.batch_size)]
         # Flatten the list of batches
@@ -133,8 +132,12 @@ class SequentialBatchSampler(Sampler):
         return len(self.data_source) // self.batch_size
     
 def pad_by_repeating(tensor, max_length):
+    current_length = tensor.size(1)
+    if current_length == 0:
+        raise ValueError("Tensor length is zero, cannot pad.")
+    
     if tensor.size(1) < max_length:
-        repeat_times = int(np.ceil(max_length / tensor.size(1)))
+        repeat_times = (max_length + current_length - 1) // current_length
         repeated_tensor = tensor.repeat(1, repeat_times)[:, :max_length]
         return repeated_tensor
     return tensor
@@ -167,9 +170,9 @@ class MapsDataset(Dataset):
         use_H (bool, optional): Whether to use pianoroll MIDI or H matrix as dataset's item (default: False).
         fixed_length (bool, optional): Whether to have a constant duration for audio/MIDI items (default: True).
         subset (float, optional): The subset of files to include in the dataset. If None, all files are used (default: None).
-        mean_filter (bool, optional): Whether to filter the dataset to keep only files with length > mean(length) (default: `False`)
+        filter (bool, optional): Whether to filter the dataset to keep only files with length > mean(length) (default: `False`)
     """
-    def __init__(self, metadata, hop_length=128, use_H=False, fixed_length=None, subset=None, sort=True, filter=False, verbose=False):
+    def __init__(self, metadata, hop_length=128, use_H=False, fixed_length=None, subset=None, sort=True, filter=False, verbose=False, dtype=None):
         assert 'file_path' in metadata.columns and 'midi_path' in metadata.columns, "Metadata should contain 'file_path' and 'midi_path' columns."
 
         self.metadata = metadata.copy()
@@ -177,6 +180,7 @@ class MapsDataset(Dataset):
         self.use_H = use_H
         self.fixed_length = fixed_length
         self.sort = sort
+        self.dtype = dtype
 
         if subset is not None:
             num_files = int(len(metadata) * subset)
@@ -190,8 +194,12 @@ class MapsDataset(Dataset):
             self.metadata.loc[:, 'time_steps'] = time_steps
             self.metadata = self.metadata.sort_values(by='duration')
             
-            if filter:
-                self.metadata = self.metadata[self.metadata['time_steps'] > self.fixed_length].reset_index(drop=True)
+            if filter and self.fixed_length is not None:
+                filter_condition = self.metadata['time_steps'] > self.fixed_length
+                indices = self.metadata.index.to_list()
+                
+                self.metadata = self.metadata[filter_condition].reset_index(drop=True)
+                self.segment_indices = [self.segment_indices[i] for i, idx in enumerate(indices) if filter_condition[idx]]
         
             self.min_length = fixed_length
     
@@ -200,14 +208,17 @@ class MapsDataset(Dataset):
         segment_indices = []
         time_steps = []
         sr = self.metadata.iloc[0]["sampling_rate"]
-        self.fixed_length = math.ceil((self.fixed_length * sr) / self.hop_length)
+        
+        if self.fixed_length is not None:
+            self.fixed_length = math.ceil((self.fixed_length * sr) / self.hop_length)
         
         for _, row in tqdm(self.metadata.iterrows()):
             waveform, _ = torchaudio.load(row.file_path)
             _, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length)
             
             durations.append(waveform.shape[1]/sr)
-            segment_indices.append(-(times_cqt.shape[0] // -self.fixed_length))
+            if self.fixed_length is not None:
+                segment_indices.append(-(times_cqt.shape[0] // -self.fixed_length))
             time_steps.append(times_cqt.shape[0])
             
         return np.array(durations), segment_indices, time_steps
@@ -219,40 +230,49 @@ class MapsDataset(Dataset):
             return len(self.metadata)
 
     def __getitem__(self, idx):
+        if idx >= len(self):
+            raise IndexError("Index out of range")
+        
         if self.fixed_length is not None:
-            
             cumulative_indices = np.cumsum(self.segment_indices)
-            file_index = np.searchsorted(cumulative_indices, idx, side='right')
-            audio_idx = idx - cumulative_indices[file_index - 1] if file_index > 0 else idx
-
-            row = self.metadata.iloc[audio_idx]
+            file_idx = np.searchsorted(cumulative_indices, idx, side='right')
+            audio_idx = idx - cumulative_indices[file_idx - 1] if file_idx > 0 else idx
+            row = self.metadata.iloc[file_idx]
             try:
                 waveform, sr = torchaudio.load(row['file_path'])
-                M, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length)
-                midi, onset, offset, _ = spec.midi_to_pianoroll(row['midi_path'], waveform, times_cqt, self.hop_length)
+                M, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length, dtype=self.dtype)
+                midi, onset, offset, _ = spec.midi_to_pianoroll(row['midi_path'], waveform, times_cqt, self.hop_length, dtype=self.dtype)
 
                 if self.use_H:
                     active_midi = [i for i in range(88) if (midi[i, :] > 0).any().item()]
                     midi = init.MIDI_to_H(midi, active_midi, onset, offset)
 
-                start_idx = idx * self.fixed_length
+                start_idx = audio_idx * self.fixed_length
                 end_idx = start_idx + self.fixed_length
+                
+                # Ensure that the end index does not exceed the length of the data
+                if end_idx > M.shape[1]:
+                    end_idx = M.shape[1]
 
                 M_segment = M[:, start_idx:end_idx]
-                midi_segment = midi[:, start_idx:end_idx]
+                # midi_segment = midi[:, start_idx:end_idx]
+                midi_segment, onset_segment, offset_segment = spec.cut_midi_segment(midi, onset, offset, start_idx, end_idx)
                 
-                print(f"Get_item shapes, M: {M_segment.shape}, H: {midi_segment.shape}")
+                # Pad the last segment if necessary
+                if M_segment.shape[1] < self.fixed_length:
+                    M_segment = pad_by_repeating(M_segment, self.fixed_length)
+                    midi_segment = pad_by_repeating(midi_segment, self.fixed_length)
 
                 return M_segment, midi_segment
             except Exception as e:
-                print(f"Skipping {row['midi_path']} due to error: {e}")
+                # print(f"Skipping {row['midi_path']} due to error: {e}")
                 return self.__getitem__((idx + 1) % len(self))
         else:
             row = self.metadata.iloc[idx]
             try:
                 waveform, sr = torchaudio.load(row['file_path'])
-                M, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length)
-                midi, onset, offset, _ = spec.midi_to_pianoroll(row['midi_path'], waveform, times_cqt, self.hop_length, sr)
+                M, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length, dtype=self.dtype)
+                midi, onset, offset, _ = spec.midi_to_pianoroll(row['midi_path'], waveform, times_cqt, self.hop_length, sr, dtype=self.dtype)
 
                 if self.use_H:
                     active_midi = [i for i in range(88) if (midi[i, :] > 0).any().item()]
@@ -729,13 +749,13 @@ def warmup_train(model, n_epochs, loader, optimizer, device, debug=False):
     
     return losses, W_hat, H_hat, H1    
  
-def train(model, loader, optimizer, criterion, device, epochs, valid_loader=None, wandb=False):
+def train(model, train_loader, valid_loader, optimizer, criterion, device, epochs, wandb=False):
     if wandb:
         run = wandb.init(
             project=f"{model.__class__.__name__}_train",
             config={
                 "learning_rate": optimizer.param_groups[-1]['lr'],
-                "batch_size": loader.batch_size,
+                "batch_size": train_loader.batch_size,
                 "epochs": epochs,
             },
         )
@@ -748,7 +768,7 @@ def train(model, loader, optimizer, criterion, device, epochs, valid_loader=None
         train_loss, valid_loss = 0, 0
         
         model.train()
-        for M, H in loader:
+        for M, H in train_loader:
             
             M = M.to(device)
             H = H.to(device)
@@ -769,34 +789,32 @@ def train(model, loader, optimizer, criterion, device, epochs, valid_loader=None
             
             train_loss += loss.item()
         
-        train_loss /= len(loader)
+        train_loss /= len(train_loader)
         train_losses.append(train_loss)
         print(f"epoch {epoch}, loss = {train_loss:5f}")
         
         if wandb:
             wandb.log({"training loss": train_loss})
     
-        if valid_loader is not None:
-        
-            model.eval()
-            for M, H in valid_loader:
-                
-                M = M.to(device)
-                H = H.to(device)
-                
-                with torch.no_grad():
-                    W_hat, H_hat, _ = model(M)
-                
-                # H_hat_r = soft_permutation_match(H_hat, model.H0, rows=True)
-                # loss = criterion(H_hat_r, H[0])
-                loss = criterion(H_hat, H)
-                valid_loss += loss.item()
+        model.eval()
+        for M, H in valid_loader:
             
-            valid_loss /= len(valid_loader)
-            valid_losses.append(valid_loss)
+            M = M.to(device)
+            H = H.to(device)
+            
+            with torch.no_grad():
+                W_hat, H_hat, _ = model(M)
+            
+            # H_hat_r = soft_permutation_match(H_hat, model.H0, rows=True)
+            # loss = criterion(H_hat_r, H[0])
+            loss = criterion(H_hat, H)
+            valid_loss += loss.item()
+        
+        valid_loss /= len(valid_loader)
+        valid_losses.append(valid_loss)
 
-            if wandb:
-                wandb.log({"valid loss": valid_loss})
+        if wandb:
+            wandb.log({"valid loss": valid_loss})
             
         if valid_loss <= valid_loss_min:
           print('validation loss decreased ({:.6f} --> {:.6f}).  Saving model ...'.format(

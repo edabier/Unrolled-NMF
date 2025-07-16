@@ -32,6 +32,7 @@ if __name__ == '__main__':
     parser.add_argument("--lr", default=1e-2, type=float)
     parser.add_argument("--epochs", default=20, type=int)
     parser.add_argument("--batch", default=1, type=int)
+    parser.add_argument("--length", default=None, type=float)
     parser.add_argument("--subset", default=1, type=float)
     parser.add_argument("--split", default=0.8, type=float)
     args = parser.parse_args()
@@ -40,6 +41,7 @@ if __name__ == '__main__':
     lr = args.lr
     epochs = args.epochs
     batch_size = args.batch
+    fixed_length = args.length
     subset = args.subset
     split = args.split
     

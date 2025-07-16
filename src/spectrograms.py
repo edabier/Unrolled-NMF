@@ -68,7 +68,7 @@ def vis_spectrogram(spec, times, frequencies, start, stop, min_freq, max_freq):
 """
 CQT Spectrogram
 """
-def cqt_spec(signal, sample_rate, hop_length=128, fmin=librosa.note_to_hz('A0'), bins_per_octave=36, n_bins=288, normalize=False):
+def cqt_spec(signal, sample_rate, hop_length=128, fmin=librosa.note_to_hz('A0'), bins_per_octave=36, n_bins=288, normalize=False, dtype=None):
     """
     Computes the CQT spectrogram
     """
@@ -86,7 +86,7 @@ def cqt_spec(signal, sample_rate, hop_length=128, fmin=librosa.note_to_hz('A0'),
         cqt_transform = nn_cqt.CQT2010v2(sr=sample_rate, hop_length=hop_length, fmin=fmin, n_bins=n_bins, bins_per_octave=bins_per_octave, verbose=False, output_format='Magnitude')
         
         with torch.no_grad():
-            cqt = cqt_transform(signal).to(torch.float16)
+            cqt = cqt_transform(signal).to(dtype)
             cqt = cqt.squeeze(0)
             
         if normalize:
@@ -253,7 +253,7 @@ def vis_erb_spectrogram(spec, freqs, times, start, stop):
 """
 MIDI processing
 """
-def midi_to_pianoroll(midi_path, waveform, times, hop_length, sr=16000):
+def midi_to_pianoroll(midi_path, waveform, times, hop_length, sr=16000, dtype=None):
     midi = pretty_midi.PrettyMIDI(midi_path)
     
     n_tracks = len(midi.instruments)
@@ -291,10 +291,27 @@ def midi_to_pianoroll(midi_path, waveform, times, hop_length, sr=16000):
                 offset_matrix[note_idx, offset_idx] = 1
 
     # Convert to tensors
-    onsets_tensor = torch.from_numpy(onset_matrix).float()
-    offsets_tensor = torch.from_numpy(offset_matrix).float()
+    onsets_tensor = torch.from_numpy(onset_matrix).to(dtype)
+    offsets_tensor = torch.from_numpy(offset_matrix).to(dtype)
 
-    return torch.from_numpy(piano_roll).to(torch.float16), onsets_tensor, offsets_tensor, times
+    return torch.from_numpy(piano_roll).to(dtype), onsets_tensor, offsets_tensor, times
+
+def cut_midi_segment(midi, onset, offset, start_idx, end_idx):
+    # Ensure notes are turned off at the end of the segment
+    active_notes = midi[:, end_idx - 1] > 0
+    offset[:, end_idx - 1] = active_notes
+
+    # Ensure notes are turned on at the beginning of the next segment if they are still active
+    next_segment_onset = torch.zeros(midi.shape[0])
+    next_segment_onset[active_notes] = 1
+    onset[:, start_idx] = next_segment_onset
+
+    # Cut the segment
+    midi_segment = midi[:, start_idx:end_idx]
+    onset_segment = onset[:, start_idx:end_idx]
+    offset_segment = offset[:, start_idx:end_idx]
+
+    return midi_segment, onset_segment, offset_segment
 
 def vis_midi(midi_mat, times, start, stop):
     start_idx = np.searchsorted(times, start)

@@ -134,7 +134,7 @@ class Aw_cnn(nn.Module):
 
     # W shape: (f,l)
     def forward(self, x):
-        print(f"Aw in: {x.shape}")                   # (batch, f, l)
+        # print(f"Aw in: {x.shape}")                   # (batch, f, l)
         if (len(x.shape) == 3):
             batch_size, f, l = x.shape
         else:
@@ -152,7 +152,7 @@ class Aw_cnn(nn.Module):
         y = self.softplus(self.conv3(y))            # (batch, 1, f*l)
         out = y.reshape(batch_size, l, f)
         out = out.permute(0,2,1)
-        print(f"Aw out: {out.shape}")
+        # print(f"Aw out: {out.shape}")
         return out
 
     
@@ -176,7 +176,7 @@ class Ah_cnn(nn.Module):
 
     # H shape: (l,t)
     def forward(self, x):
-        print(f"Ah in: {x.shape}")            # (batch, l, t)
+        # print(f"Ah in: {x.shape}")            # (batch, l, t)
         if (len(x.shape) == 3):
             batch_size, l, t = x.shape
         else:
@@ -194,7 +194,7 @@ class Ah_cnn(nn.Module):
         y = self.relu(self.conv3(y))            # (batch, 1, t*l)
         out = self.softplus(y)                  # (batch, 1, t*l)
         out = out.view(batch_size, l, t)        # (batch, l, t*l)
-        print(f"Ah out: {out.shape}")
+        # print(f"Ah out: {out.shape}")
         return out   
    
    
@@ -504,6 +504,7 @@ class RALMU(nn.Module):
         self.verbose        = verbose
         self.normalize      = normalize
         self.return_layers  = return_layers
+        self.dtype          = dtype
 
         shared_aw = Aw_cnn(hidden_channels=hidden, dtype=dtype) if self.shared else None
         if use_ah:
@@ -542,7 +543,7 @@ class RALMU(nn.Module):
             # Non-batched input (inference phase)
             _, t = M.shape
             
-        W, _, _, _ = init.init_W(self.W_path, verbose=self.verbose)
+        W, _, _, _ = init.init_W(self.W_path, verbose=self.verbose, dtype=self.dtype)
         if batch_size is not None:
             W = W.unsqueeze(0).expand(batch_size, -1, -1)
         

@@ -17,7 +17,7 @@ def first_non_zero(f0):
     non_zero    = torch.argmax(f0_2, 0, keepdim=True)
     return non_zero
 
-def init_W(folder_path=None, hop_length=128, bins_per_octave=36, n_bins=288, verbose=False, normalize=True):
+def init_W(folder_path=None, hop_length=128, bins_per_octave=36, n_bins=288, verbose=False, normalize=True, dtype=None):
     """
     Create a W matrix from all audio files contained in the input path
     By taking the column of highest energy of the CQT
@@ -42,7 +42,7 @@ def init_W(folder_path=None, hop_length=128, bins_per_octave=36, n_bins=288, ver
             assert duration >= min_duration, f"Audio file {fname} is too short. Duration: {duration:.2f}s, Required: {min_duration:.2f}s"
             
             spec_cqt, _, freq = spec.cqt_spec(y, sample_rate=sr, hop_length=hop_length,
-                                    bins_per_octave=bins_per_octave, n_bins=n_bins, normalize=normalize)
+                                    bins_per_octave=bins_per_octave, n_bins=n_bins, normalize=normalize, dtype=dtype)
             
             if len(fname) == 7:
                 note, octave = fname[0:2], int(fname[2])
@@ -83,7 +83,7 @@ def init_W(folder_path=None, hop_length=128, bins_per_octave=36, n_bins=288, ver
         print("Initialized W with synthetic data")
     return W, freqs, sr, true_freqs
 
-def init_H(l, t, W, M, n_init_steps, beta=1, device=None, batch_size=None):
+def init_H(l, t, W, M, n_init_steps, beta=1, device=None, batch_size=None, dtype=None):
     eps = 1e-6
     
     if batch_size is not None:
