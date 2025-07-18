@@ -10,10 +10,15 @@ import matplotlib.pyplot as plt
 import glob, os, warnings, math
 import mir_eval
 from tqdm import tqdm
+import subprocess, csv, datetime
 from scipy.optimize import linear_sum_assignment
 
 import src.spectrograms as spec
 import src.init as init
+
+"""
+Model and gpu infos 
+"""
 
 def model_infos(model, names=False):
     """
@@ -25,6 +30,38 @@ def model_infos(model, names=False):
         for name, param in model.named_parameters():
             print(f"Layer: {name} | Size: {param.size()}")
     print(f"The model has {total_params} parameters")
+
+def get_gpu_info():
+    try:
+        # Run the nvidia-smi command to get GPU name and power draw
+        result = subprocess.run(
+            ['nvidia-smi', '--query-gpu=name,power.draw', '--format=csv,noheader'],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True
+        )
+
+        # Extract the GPU name and power draw values
+        lines = result.stdout.strip().split('\n')
+        gpu_info = [line.split(', ') for line in lines]
+        return gpu_info
+    except subprocess.CalledProcessError as e:
+        print(f"Error running nvidia-smi: {e}")
+        return None
+
+def log_gpu_info(gpu_info, filename='logs/gpu_info_log.csv'):
+    with open(filename, mode='a', newline='') as file:
+        writer = csv.writer(file)
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        for info in gpu_info:
+            if len(info) == 2:  # Ensure both name and power draw are captured
+                writer.writerow([timestamp, info[0], info[1]])
+
+
+"""
+Dataset class and utils functions
+"""
 
 class NMFDataset(Dataset):
     """
@@ -172,7 +209,7 @@ class MapsDataset(Dataset):
         subset (float, optional): The subset of files to include in the dataset. If None, all files are used (default: None).
         filter (bool, optional): Whether to filter the dataset to keep only files with length > mean(length) (default: `False`)
     """
-    def __init__(self, metadata, hop_length=128, use_H=False, fixed_length=None, subset=None, sort=True, filter=False, verbose=False, dtype=None):
+    def __init__(self, metadata, hop_length=128, use_H=False, fixed_length=None, subset=None, sort=True, filter=False, downsample=False, verbose=False, dtype=None):
         assert 'file_path' in metadata.columns and 'midi_path' in metadata.columns, "Metadata should contain 'file_path' and 'midi_path' columns."
 
         self.metadata = metadata.copy()
@@ -180,6 +217,7 @@ class MapsDataset(Dataset):
         self.use_H = use_H
         self.fixed_length = fixed_length
         self.sort = sort
+        self.downsample = downsample
         self.dtype = dtype
 
         if subset is not None:
@@ -214,6 +252,13 @@ class MapsDataset(Dataset):
         
         for _, row in tqdm(self.metadata.iterrows()):
             waveform, _ = torchaudio.load(row.file_path)
+            
+            if self.downsample:
+                downsample_rate = sr//2
+                downsampler = torchaudio.transforms.Resample(sr, downsample_rate, dtype=y.dtype)
+                waveform = downsampler(waveform)
+                sr = downsample_rate
+            
             _, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length)
             
             durations.append(waveform.shape[1]/sr)
@@ -240,12 +285,20 @@ class MapsDataset(Dataset):
             row = self.metadata.iloc[file_idx]
             try:
                 waveform, sr = torchaudio.load(row['file_path'])
-                M, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length, dtype=self.dtype)
+                
+                if self.downsample:
+                    downsample_rate = sr//2
+                    downsampler = torchaudio.transforms.Resample(sr, downsample_rate, dtype=waveform.dtype)
+                    waveform = downsampler(waveform)
+                    sr = downsample_rate
+                    
+                M, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length, normalize_thresh=0.1, dtype=self.dtype)
                 midi, onset, offset, _ = spec.midi_to_pianoroll(row['midi_path'], waveform, times_cqt, self.hop_length, dtype=self.dtype)
 
                 if self.use_H:
                     active_midi = [i for i in range(88) if (midi[i, :] > 0).any().item()]
                     midi = init.MIDI_to_H(midi, active_midi, onset, offset)
+                    midi = midi/ spec.l1_norm(midi, threshold=0.1)
 
                 start_idx = audio_idx * self.fixed_length
                 end_idx = start_idx + self.fixed_length
@@ -271,12 +324,20 @@ class MapsDataset(Dataset):
             row = self.metadata.iloc[idx]
             try:
                 waveform, sr = torchaudio.load(row['file_path'])
-                M, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length, dtype=self.dtype)
+                
+                if self.downsample:
+                    downsample_rate = sr//2
+                    downsampler = torchaudio.transforms.Resample(sr, downsample_rate, dtype=waveform.dtype)
+                    waveform = downsampler(waveform)
+                    sr = downsample_rate
+                    
+                M, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length, normalize_thresh=0.1, dtype=self.dtype)
                 midi, onset, offset, _ = spec.midi_to_pianoroll(row['midi_path'], waveform, times_cqt, self.hop_length, sr, dtype=self.dtype)
 
                 if self.use_H:
                     active_midi = [i for i in range(88) if (midi[i, :] > 0).any().item()]
                     midi = init.MIDI_to_H(midi, active_midi, onset, offset)
+                    midi = midi/ spec.l1_norm(midi, threshold=0.1)
 
                 return M, midi
             except Exception as e:
@@ -774,10 +835,6 @@ def train(model, train_loader, valid_loader, optimizer, criterion, device, epoch
             H = H.to(device)
             
             W_hat, H_hat, _ = model(M, device=device)
-            
-            # sfm = spectral_flatness(W_hat, log_val=1e-5)
-            # harmonicity = torch.mean(sfm)
-            # print(f"Harmonicity score: {harmonicity}")
             
             # H_hat_r = soft_permutation_match(H_hat, model.H0, rows=True)
             

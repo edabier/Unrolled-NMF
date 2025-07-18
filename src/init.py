@@ -17,7 +17,7 @@ def first_non_zero(f0):
     non_zero    = torch.argmax(f0_2, 0, keepdim=True)
     return non_zero
 
-def init_W(folder_path=None, hop_length=128, bins_per_octave=36, n_bins=288, verbose=False, normalize=True, dtype=None):
+def init_W(folder_path=None, hop_length=128, bins_per_octave=36, n_bins=288, downsample=False, verbose=False, normalize=True, dtype=None):
     """
     Create a W matrix from all audio files contained in the input path
     By taking the column of highest energy of the CQT
@@ -36,13 +36,19 @@ def init_W(folder_path=None, hop_length=128, bins_per_octave=36, n_bins=288, ver
         for fname in file_list:
             path = os.path.join(folder_path, fname)
             y, sr = torchaudio.load(path)
+                
+            if downsample:
+                downsample_rate = sr//2
+                downsampler = torchaudio.transforms.Resample(sr, downsample_rate, dtype=y.dtype)
+                waveform = downsampler(waveform)
+                sr = downsample_rate
             
             duration = y.shape[1] / sr
             min_duration = (n_bins * hop_length) / sr
             assert duration >= min_duration, f"Audio file {fname} is too short. Duration: {duration:.2f}s, Required: {min_duration:.2f}s"
             
             spec_cqt, _, freq = spec.cqt_spec(y, sample_rate=sr, hop_length=hop_length,
-                                    bins_per_octave=bins_per_octave, n_bins=n_bins, normalize=normalize, dtype=dtype)
+                                    bins_per_octave=bins_per_octave, n_bins=n_bins, dtype=dtype)
             
             if len(fname) == 7:
                 note, octave = fname[0:2], int(fname[2])
@@ -67,6 +73,9 @@ def init_W(folder_path=None, hop_length=128, bins_per_octave=36, n_bins=288, ver
         # W of shape f * (88*n)
         W = torch.stack(templates, axis=1)
         
+        if normalize:
+            W = W/ torch.sum(torch.abs(W), dim=0, keepdim=True)
+        
         if verbose:
             print("Initialized W for the model from files")
 
@@ -87,9 +96,9 @@ def init_H(l, t, W, M, n_init_steps, beta=1, device=None, batch_size=None, dtype
     eps = 1e-6
     
     if batch_size is not None:
-        H = torch.rand(batch_size, l, t, dtype=torch.float16) + eps
+        H = torch.rand(batch_size, l, t, dtype=dtype) + eps
     else:
-        H = torch.rand(l, t, dtype=torch.float16) + eps
+        H = torch.rand(l, t, dtype=dtype) + eps
         
     if device is not None:
         H = H.to(device)

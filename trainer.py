@@ -66,7 +66,7 @@ if __name__ == '__main__':
     ##########################################################
     print("Loading the model...")
     W_path = 'AMT/Unrolled-NMF/test-data/synth-single-notes'
-    ralmu = models.RALMU(l=88, beta=1, W_path=W_path, n_iter=10, n_init_steps=1, hidden=8, shared=True, return_layers=False, batch_size=batch_size, smaller_A=True)
+    ralmu = models.RALMU(l=88, beta=1, W_path=W_path, n_iter=10, n_init_steps=1, hidden=8, shared=True, return_layers=False, smaller_A=True, dtype=torch.float16)
     
     
     ##########################################################
@@ -77,7 +77,7 @@ if __name__ == '__main__':
     
     print("Starting training...")
     
-    losses, valid_losses, W_hat, H_hat = utils.train(ralmu, train_loader, optimizer, criterion, dev, epochs, valid_loader)
+    losses, valid_losses, W_hat, H_hat = utils.train(ralmu, train_loader, valid_loader, optimizer, criterion, dev, epochs)
     
     # if np.abs(losses[0]-losses[1]) > 1e2:
     #     losses = losses[1:]

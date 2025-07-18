@@ -68,7 +68,7 @@ def vis_spectrogram(spec, times, frequencies, start, stop, min_freq, max_freq):
 """
 CQT Spectrogram
 """
-def cqt_spec(signal, sample_rate, hop_length=128, fmin=librosa.note_to_hz('A0'), bins_per_octave=36, n_bins=288, normalize=False, dtype=None):
+def cqt_spec(signal, sample_rate, hop_length=128, fmin=librosa.note_to_hz('A0'), bins_per_octave=36, n_bins=288, normalize_thresh=None, dtype=None):
     """
     Computes the CQT spectrogram
     """
@@ -89,8 +89,9 @@ def cqt_spec(signal, sample_rate, hop_length=128, fmin=librosa.note_to_hz('A0'),
             cqt = cqt_transform(signal).to(dtype)
             cqt = cqt.squeeze(0)
             
-        if normalize:
-            cqt = cqt / torch.sum(torch.abs(cqt), dim=0, keepdim=True)
+        if normalize_thresh is not None:
+            cqt = l1_norm(cqt, threshold=normalize_thresh, set_to_zero=True)
+            # cqt = cqt / torch.sum(torch.abs(cqt), dim=0, keepdim=True)
             
         # Convert magnitude to decibels
         # cqt = librosa.cqt(y=signal.cpu().numpy(), sr=sample_rate, hop_length=hop_length, fmin=fmin, n_bins=n_bins, bins_per_octave=bins_per_octave)
@@ -103,7 +104,7 @@ def cqt_spec(signal, sample_rate, hop_length=128, fmin=librosa.note_to_hz('A0'),
  
         cqt = librosa.cqt(y=signal, sr=sample_rate, hop_length=hop_length, fmin=fmin, n_bins=n_bins, bins_per_octave=bins_per_octave)
     
-        if normalize:
+        if normalize_thresh is not None:
             cqt = np.apply_along_axis(lambda x: x / np.sum(np.abs(x)), axis=0, arr=cqt)
 
         # Convert magnitude to decibels
@@ -122,16 +123,32 @@ def cqt_spec(signal, sample_rate, hop_length=128, fmin=librosa.note_to_hz('A0'),
     else:
         return torch.from_numpy(cqt), times, frequencies
 
-def max_columns(W):
-    max_values, _ = torch.max(W, dim=0)
-    W_max = torch.zeros_like(W)
-    _, max_indices = torch.max(W, dim=0)
-    for col in range(W.shape[1]):
-        W_max[max_indices[col], col] = max_values[col]
+def l1_norm(tensor, threshold, set_to_zero=True):
+    l1_norm = torch.sum(torch.abs(tensor), dim=0, keepdim=True)
+    mean_norm = torch.mean(l1_norm)
+    
+    mask = l1_norm >= threshold * mean_norm
+    normalized_tensor = tensor / l1_norm
 
-    return W_max
+    if set_to_zero:
+        tensor = normalized_tensor * mask
+    else:
+        tensor = torch.where(mask, normalized_tensor, tensor)
 
-def vis_cqt_spectrogram(spec, times, frequencies, start, stop, set_note_label=False, add_C8=False, cmap="magma", title=None, x_axis=None):
+    return tensor
+
+def vis_cqt_spectrogram(spec, times=None, frequencies=None, start=None, stop=None, set_note_label=False, add_C8=False, cmap="magma", title=None, x_axis=None):
+    
+    if times is None:
+        times = np.arange(spec.shape[1])
+    
+    if frequencies is None:
+        frequencies = np.arange(spec.shape[0])
+    
+    if start is None:
+        start = 0
+        end = spec.shape[1]    
+    
     start_idx       = np.searchsorted(times, start)
     stop_idx        = np.searchsorted(times, stop)
 

@@ -118,9 +118,9 @@ class Aw_cnn(nn.Module):
     """
     Defining a 1D CNN (frequency axis) for Aw()
     reshapes input of shape (batch, f, l) to (batch, 1, f*l) and applies convolution to f*l
-    1 channel -> 32 ch kernel=5 pad=2 -> 1 ch kernel=3 pad=1
+    1 channel -> 64 ch kernel=5 pad=2 -> 1 ch kernel=3 pad=1
     """
-    def __init__(self, in_channels=1, hidden_channels=2, dtype=None):
+    def __init__(self, in_channels=1, hidden_channels=32, dtype=None):
         super(Aw_cnn, self).__init__()
         self.conv1 = nn.Conv1d(in_channels, hidden_channels*2, kernel_size=5, padding=5 // 2, dtype=dtype)
         self.conv2 = nn.Conv1d(hidden_channels*2, hidden_channels, kernel_size=3, padding=3 // 2, dtype=dtype)
@@ -135,24 +135,55 @@ class Aw_cnn(nn.Module):
     # W shape: (f,l)
     def forward(self, x):
         # print(f"Aw in: {x.shape}")                   # (batch, f, l)
+        # if (len(x.shape) == 3):
+        #     batch_size, f, l = x.shape
+        # else:
+        #     f, l = x.shape
+        #     batch_size = 1
+        batch_size, f = x.shape
+        # x = x.reshape(batch_size, 1, f*l)           # (batch, 1, f*l)
+        # x = x.transpose(1, 2).reshape(batch_size, 1, f*l)
+        x = x.reshape(batch_size, 1, f)
+        # plt.imshow(x[0], cmap='Reds')
+        # plt.title("Reshaped W input")
+        # plt.colorbar()
+        # plt.show()
+        # print(f"Aw reshaped: {x.shape}")
+        y = self.relu(self.bn1(self.conv1(x)))      # (batch, 64, f*l)
+        y = self.relu(self.bn2(self.conv2(y)))      # (batch, 32, f*l)
+        y = self.softplus(self.conv3(y))            # (batch, 1, f*l)
+        # out = y.reshape(batch_size, f, l)
+        out = y.reshape(batch_size, f, 1)
+        # print(f"Aw out: {out.shape}")
+        return out
+    
+
+class Aw_2d_cnn(nn.Module):
+    """
+    Defining a 2D CNN for Aw
+    1 channel -> 64 ch kernel=5 pad=2 -> 1 ch kernel=3 pad=1    
+    """
+    def __init__(self, in_channels=1, hidden_channels=2, dtype=None):
+        super(Aw_2d_cnn, self).__init__()
+        self.conv1 = nn.Conv2d(in_channels, hidden_channels*2, kernel_size=(24*5,5), padding="same", dtype=dtype)
+        self.conv2 = nn.Conv2d(hidden_channels*2, hidden_channels, kernel_size=(24*3,3), padding="same", dtype=dtype)
+        self.conv3 = nn.Conv2d(hidden_channels, 1, kernel_size=(24*3,3), padding="same", dtype=dtype)
+        self.bn1 = nn.BatchNorm2d(hidden_channels*2, dtype=dtype)
+        self.bn2 = nn.BatchNorm2d(hidden_channels, dtype=dtype)
+        self.relu  = nn.LeakyReLU()
+        self.softplus = nn.Softplus()
+    
+    def forward(self, x):
         if (len(x.shape) == 3):
             batch_size, f, l = x.shape
         else:
             f, l = x.shape
             batch_size = 1
-        x = x.reshape(batch_size, 1, f*l)           # (batch, 1, f*l)
-        # x = x.transpose(1, 2).reshape(batch_size, 1, f*l).transpose(1, 2)
-        # plt.imshow(x[0], cmap='Reds')
-        # plt.title("Reshaped tensor Aw")
-        # plt.colorbar()
-        # plt.show()
-        print(f"Aw reshaped: {x.shape}")
+        x = x.reshape(batch_size, 1, f, l)
         y = self.relu(self.bn1(self.conv1(x)))      # (batch, 64, f*l)
         y = self.relu(self.bn2(self.conv2(y)))      # (batch, 32, f*l)
         y = self.softplus(self.conv3(y))            # (batch, 1, f*l)
-        out = y.reshape(batch_size, l, f)
-        out = out.permute(0,2,1)
-        # print(f"Aw out: {out.shape}")
+        out = y.reshape(batch_size, f, l)
         return out
 
     
@@ -182,13 +213,13 @@ class Ah_cnn(nn.Module):
         else:
             l, t = x.shape
             batch_size = 1
-        x = x.view(batch_size * l, 1, t)        # (batch, 1, t*l)
-        # x = x.reshape(batch_size, 1, l*t)
+        # x = x.view(batch_size * l, 1, t)        # (batch, 1, t*l)
+        x = x.reshape(batch_size, 1, l*t)
         # plt.imshow(x[0], cmap='Reds')
-        # plt.title("Reshaped tensor Ah")
+        # plt.title("Reshaped H input")
         # plt.colorbar()
         # plt.show()
-        print(f"Ah reshaped: {x.shape}")
+        # print(f"Ah reshaped: {x.shape}")
         y = self.relu(self.bn1(self.conv1(x)))  # (batch, 64, t*l)
         y = self.relu(self.bn2(self.conv2(y)))  # (batch, 32, t*l)
         y = self.relu(self.conv3(y))            # (batch, 1, t*l)
@@ -377,11 +408,13 @@ class RALMU_block(nn.Module):
         learnable_beta (bool, optional): whether to learn the value of beta (default: ``False``)
         normalize (bool, optional): whether to normalize W and H (default: ``False``)
     """
-    def __init__(self, beta=1, eps=1e-6, shared_aw=None, shared_ah=None, use_ah=True, learnable_beta=False, normalize=False, smaller_A=False, dtype=None):
+    def __init__(self, beta=1, eps=1e-6, shared_aw=None, shared_ah=None, use_ah=True, learnable_beta=False, normalize=False, aw_2d=False, clip_H=False, dtype=None):
         super().__init__()
         
         self.use_ah = use_ah
-        self.Aw = shared_aw if shared_aw is not None else Aw_cnn(dtype=dtype)
+        self.aw_2d = aw_2d
+        
+        self.Aw = shared_aw if shared_aw is not None else (Aw_2d_cnn(dtype=dtype) if self.aw_2d else Aw_cnn())
         if self.use_ah:
             self.Ah = shared_ah if shared_ah is not None else Ah_cnn(dtype=dtype)
             
@@ -391,7 +424,7 @@ class RALMU_block(nn.Module):
             self.register_buffer("beta", torch.tensor(beta))
         self.eps = eps
         self.normalize = normalize
-        self.smaller_A = smaller_A
+        self.clip_H    = clip_H 
 
     def forward(self, M, W, H):
         
@@ -419,12 +452,14 @@ class RALMU_block(nn.Module):
         # Apply learned transformation (Aw)
         
         # Use octave splitting to inject only intra-octave notes in Aw
-        if self.smaller_A:
+        if self.aw_2d:
             octave_W = [W[:, :, :4]] + [W[:, :, i+4:i+16] for i in range(0, 84, 12)]
             accel_W = torch.cat([self.Aw(W_i)[0] for W_i in octave_W], 1)
             W_new = W * accel_W * update_W
         else:
-            W_new = W * self.Aw(W) * update_W
+            accel_W = torch.cat([self.Aw(W[:, :, i]) for i in range(88)], 2)
+            # print(self.Aw(W[:,:,0]).shape, accel_W.shape)
+            W_new = W * accel_W * update_W
             
         # Avoid going to zero by clamping    
         W_new = torch.clamp(W_new, min=self.eps)
@@ -446,12 +481,9 @@ class RALMU_block(nn.Module):
 
         # Apply learned transformation (Ah)
         if self.use_ah:
-            if self.smaller_A:
-                H_rows = [H[:, i:i+1, :] for i in range(0, 88)]
-                accel_H = torch.cat([self.Ah(H_i) for H_i in H_rows], 1)
-                H_new = H * accel_H * update_H
-            else:
-                H_new = H * self.Ah(H) * update_H
+            H_rows = [H[:, i:i+1, :] for i in range(0, 88)]
+            accel_H = torch.cat([self.Ah(H_i) for H_i in H_rows], 1)
+            H_new = H * accel_H * update_H
         else:
             H_new = H * update_H
             
@@ -464,6 +496,9 @@ class RALMU_block(nn.Module):
         if not is_batched:
             W_new = W_new.squeeze(0)
             H_new = H_new.squeeze(0)
+            
+        if self.clip_H:
+            H_new = torch.clip(H_new, max=1)
         
         return W_new, H_new
 
@@ -488,7 +523,7 @@ class RALMU(nn.Module):
         normalize (bool, optional): whether to normalize W and H (default: ``False``)
     """
     
-    def __init__(self, l=88, eps=1e-6, beta=1, W_path=None, n_iter=10, n_init_steps=100, hidden=32, use_ah=True, shared=False, n_bins=288, bins_per_octave=36, verbose=False, normalize=False, return_layers=True, batch_size=None, smaller_A=False, dtype=None):
+    def __init__(self, l=88, eps=1e-6, beta=1, W_path=None, n_iter=10, n_init_steps=100, hidden=32, use_ah=True, shared=False, n_bins=288, bins_per_octave=36, downsample=False, verbose=False, normalize=False, return_layers=True, aw_2d=False, clip_H=False, dtype=None):
         super().__init__()
         
         self.n_bins          = n_bins
@@ -501,12 +536,13 @@ class RALMU(nn.Module):
         self.n_iter         = n_iter
         self.n_init_steps   = n_init_steps
         self.shared         = shared
+        self.downsample     = downsample
         self.verbose        = verbose
         self.normalize      = normalize
         self.return_layers  = return_layers
         self.dtype          = dtype
 
-        shared_aw = Aw_cnn(hidden_channels=hidden, dtype=dtype) if self.shared else None
+        shared_aw = (Aw_2d_cnn(hidden_channels=hidden, dtype=dtype) if aw_2d else Aw_cnn(hidden_channels=hidden, dtype=dtype)) if self.shared else None
         if use_ah:
             shared_ah = Ah_cnn(hidden_channels=hidden, dtype=dtype) if self.shared else None
         else:
@@ -514,24 +550,9 @@ class RALMU(nn.Module):
 
         # Unrolling layers
         self.layers = nn.ModuleList([
-            RALMU_block(eps=self.eps, shared_aw=shared_aw, shared_ah=shared_ah, use_ah=use_ah, normalize=self.normalize, smaller_A=smaller_A, dtype=dtype)
+            RALMU_block(eps=self.eps, shared_aw=shared_aw, shared_ah=shared_ah, use_ah=use_ah, normalize=self.normalize, aw_2d=aw_2d, clip_H=clip_H, dtype=dtype)
             for _ in range(self.n_iter)
         ])
-            
-    def init_H(self, M, device=None):
-        
-        batch_size = None
-        
-        if len(M.shape) == 3:
-            # Batched input (training phase)
-            batch_size, f, t = M.shape
-        elif len(M.shape) == 2:
-            # Non-batched input (inference phase)
-            f, t = M.shape
-        
-        H0 = init.init_H(self.l, t, self.W0, M, n_init_steps=self.n_init_steps, beta=self.beta, device=device, batch_size=batch_size)
-
-        self.register_buffer("H0", H0)
     
     def forward(self, M, device=None):
         
@@ -543,11 +564,11 @@ class RALMU(nn.Module):
             # Non-batched input (inference phase)
             _, t = M.shape
             
-        W, _, _, _ = init.init_W(self.W_path, verbose=self.verbose, dtype=self.dtype)
+        W, _, _, _ = init.init_W(self.W_path, downsample=self.downsample, verbose=self.verbose, dtype=self.dtype)
         if batch_size is not None:
             W = W.unsqueeze(0).expand(batch_size, -1, -1)
         
-        H = init.init_H(self.l, t, W, M, n_init_steps=self.n_init_steps, beta=self.beta, device=device, batch_size=batch_size)
+        H = init.init_H(self.l, t, W, M, n_init_steps=self.n_init_steps, beta=self.beta, device=device, batch_size=batch_size, dtype=self.dtype)
         
         if self.return_layers:
             W_layers = []
@@ -565,9 +586,6 @@ class RALMU(nn.Module):
             return W_layers, H_layers, M_hats
         else:
             for layer in self.layers:
-                # W_hat, H_hat = layer(M, W, H)
-                # W = W_hat
-                # H = H_hat
                 W, H = layer(M, W, H)
             M_hat = W @ H
             return W, H, M_hat
