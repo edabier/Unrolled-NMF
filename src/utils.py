@@ -10,7 +10,8 @@ import matplotlib.pyplot as plt
 import glob, os, warnings, math
 import mir_eval
 from tqdm import tqdm
-import subprocess, csv, datetime
+import subprocess, csv
+from datetime import datetime
 from scipy.optimize import linear_sum_assignment
 
 import src.spectrograms as spec
@@ -35,7 +36,7 @@ def get_gpu_info():
     try:
         # Run the nvidia-smi command to get GPU name and power draw
         result = subprocess.run(
-            ['nvidia-smi', '--query-gpu=name,power.draw', '--format=csv,noheader'],
+            ['nvidia-smi', '--query-gpu=name,power.draw,memory.used', '--format=csv,noheader,nounits'],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -55,8 +56,8 @@ def log_gpu_info(gpu_info, filename='logs/gpu_info_log.csv'):
         writer = csv.writer(file)
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         for info in gpu_info:
-            if len(info) == 2:  # Ensure both name and power draw are captured
-                writer.writerow([timestamp, info[0], info[1]])
+            if len(info) == 3:  # Ensure name, power draw and memory are captured
+                writer.writerow([timestamp, info[0], info[1], info[2]])
 
 
 """
@@ -209,7 +210,7 @@ class MapsDataset(Dataset):
         subset (float, optional): The subset of files to include in the dataset. If None, all files are used (default: None).
         filter (bool, optional): Whether to filter the dataset to keep only files with length > mean(length) (default: `False`)
     """
-    def __init__(self, metadata, hop_length=128, use_H=False, fixed_length=None, subset=None, sort=True, filter=False, downsample=False, verbose=False, dtype=None):
+    def __init__(self, metadata, hop_length=128, use_H=False, fixed_length=None, subset=None, sort=True, filter=False, downsample=False, norm_thresh=0.1, verbose=False, dtype=None):
         assert 'file_path' in metadata.columns and 'midi_path' in metadata.columns, "Metadata should contain 'file_path' and 'midi_path' columns."
 
         self.metadata = metadata.copy()
@@ -218,6 +219,7 @@ class MapsDataset(Dataset):
         self.fixed_length = fixed_length
         self.sort = sort
         self.downsample = downsample
+        self.nom_thresh = norm_thresh
         self.dtype = dtype
 
         if subset is not None:
@@ -255,7 +257,7 @@ class MapsDataset(Dataset):
             
             if self.downsample:
                 downsample_rate = sr//2
-                downsampler = torchaudio.transforms.Resample(sr, downsample_rate, dtype=y.dtype)
+                downsampler = torchaudio.transforms.Resample(sr, downsample_rate, dtype=waveform.dtype)
                 waveform = downsampler(waveform)
                 sr = downsample_rate
             
@@ -292,13 +294,14 @@ class MapsDataset(Dataset):
                     waveform = downsampler(waveform)
                     sr = downsample_rate
                     
-                M, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length, normalize_thresh=0.1, dtype=self.dtype)
+                M, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length, normalize_thresh=self.norm_thresh, dtype=self.dtype)
                 midi, onset, offset, _ = spec.midi_to_pianoroll(row['midi_path'], waveform, times_cqt, self.hop_length, dtype=self.dtype)
 
                 if self.use_H:
                     active_midi = [i for i in range(88) if (midi[i, :] > 0).any().item()]
                     midi = init.MIDI_to_H(midi, active_midi, onset, offset)
-                    midi = midi/ spec.l1_norm(midi, threshold=0.1)
+                    if self.norm_thresh is not None:
+                        midi = midi/ spec.l1_norm(midi, threshold=self.norm_thresh)
 
                 start_idx = audio_idx * self.fixed_length
                 end_idx = start_idx + self.fixed_length
@@ -331,13 +334,14 @@ class MapsDataset(Dataset):
                     waveform = downsampler(waveform)
                     sr = downsample_rate
                     
-                M, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length, normalize_thresh=0.1, dtype=self.dtype)
+                M, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length, normalize_thresh=self.norm_thresh, dtype=self.dtype)
                 midi, onset, offset, _ = spec.midi_to_pianoroll(row['midi_path'], waveform, times_cqt, self.hop_length, sr, dtype=self.dtype)
 
                 if self.use_H:
                     active_midi = [i for i in range(88) if (midi[i, :] > 0).any().item()]
                     midi = init.MIDI_to_H(midi, active_midi, onset, offset)
-                    midi = midi/ spec.l1_norm(midi, threshold=0.1)
+                    if self.norm_thresh is not None:
+                        midi = midi/ spec.l1_norm(midi, threshold=self.norm_thresh)
 
                 return M, midi
             except Exception as e:

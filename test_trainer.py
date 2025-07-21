@@ -47,18 +47,18 @@ def main(iter, lr, epochs, batch, length, filter, subset, split):
 
     dtype = torch.float16
 
-    train_set   = utils.MapsDataset(train_data, fixed_length=length, subset=subset, verbose=True, sort=filter, filter=filter, dtype=dtype)
-    test_set    = utils.MapsDataset(test_data, fixed_length=length, subset=subset, verbose=True, sort=filter, filter=filter, dtype=dtype)
-    valid_set   = utils.MapsDataset(valid_data, fixed_length=length, subset=subset, verbose=True, sort=filter, filter=filter, dtype=dtype)
+    train_set   = utils.MapsDataset(train_data, use_H=True, fixed_length=length, subset=subset, verbose=True, sort=filter, filter=filter, dtype=dtype)
+    test_set    = utils.MapsDataset(test_data, use_H=True, fixed_length=length, subset=subset, verbose=True, sort=filter, filter=filter, dtype=dtype)
+    valid_set   = utils.MapsDataset(valid_data, use_H=True, fixed_length=length, subset=subset, verbose=True, sort=filter, filter=filter, dtype=dtype)
 
     train_sampler   = utils.SequentialBatchSampler(train_set, batch_size=batch)
-    train_loader    = DataLoader(train_set, batch_sampler=train_sampler, collate_fn=utils.collate_fn)
+    train_loader    = DataLoader(train_set, batch_sampler=train_sampler, collate_fn=utils.collate_fn, num_workers=4)
 
     test_sampler   = utils.SequentialBatchSampler(test_set, batch_size=batch)
-    test_loader     = DataLoader(test_set, batch_sampler=test_sampler, collate_fn=utils.collate_fn)
+    test_loader     = DataLoader(test_set, batch_sampler=test_sampler, collate_fn=utils.collate_fn, num_workers=4)
 
     valid_sampler   = utils.SequentialBatchSampler(valid_set, batch_size=batch)
-    valid_loader    = DataLoader(valid_set, batch_sampler=valid_sampler, collate_fn=utils.collate_fn)
+    valid_loader    = DataLoader(valid_set, batch_sampler=valid_sampler, collate_fn=utils.collate_fn, num_workers=4)
 
     print(f"Train dataset: {len(train_loader)}, valid dataset: {len(valid_loader)}")
 

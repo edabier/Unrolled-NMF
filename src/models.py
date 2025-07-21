@@ -406,13 +406,15 @@ class RALMU_block(nn.Module):
         shared_aw (Ah_cnn, optional): whether to use a predefined Ah acceleration model or to create one (default: ``None``)
         use_ah (bool, optional): whether to use Ah in the acceleration of MU (default: ``True``)
         learnable_beta (bool, optional): whether to learn the value of beta (default: ``False``)
-        normalize (bool, optional): whether to normalize W and H (default: ``False``)
     """
-    def __init__(self, beta=1, eps=1e-6, shared_aw=None, shared_ah=None, use_ah=True, learnable_beta=False, normalize=False, aw_2d=False, clip_H=False, dtype=None):
+    def __init__(self, beta=1, eps=1e-6, shared_aw=None, shared_ah=None, use_ah=True, learnable_beta=False, aw_2d=False, clip_H=False, sparse=None, dtype=None):
         super().__init__()
         
         self.use_ah = use_ah
-        self.aw_2d = aw_2d
+        self.aw_2d  = aw_2d
+        self.eps    = eps
+        self.clip_H = clip_H 
+        self.sparse = sparse
         
         self.Aw = shared_aw if shared_aw is not None else (Aw_2d_cnn(dtype=dtype) if self.aw_2d else Aw_cnn())
         if self.use_ah:
@@ -422,9 +424,6 @@ class RALMU_block(nn.Module):
             self.beta = nn.Parameter(torch.tensor(beta)) 
         else:
             self.register_buffer("beta", torch.tensor(beta))
-        self.eps = eps
-        self.normalize = normalize
-        self.clip_H    = clip_H 
 
     def forward(self, M, W, H):
         
@@ -447,6 +446,10 @@ class RALMU_block(nn.Module):
         # MU for W
         numerator_W = wh_2_m @ H.transpose(-1, -2)
         denominator_W = wh_1 @ H.transpose(-1, -2) + self.eps
+        
+        if self.sparse is not None:
+            denominator_W += self.sparse
+            
         update_W = numerator_W / denominator_W
 
         # Apply learned transformation (Aw)
@@ -463,9 +466,6 @@ class RALMU_block(nn.Module):
             
         # Avoid going to zero by clamping    
         W_new = torch.clamp(W_new, min=self.eps)
-        
-        if self.normalize:
-            W_new = W_new / (W_new.sum(dim=1, keepdim=True) + self.eps)
 
         # Compute WH again with updated W
         wh = W_new @ H + self.eps
@@ -477,6 +477,10 @@ class RALMU_block(nn.Module):
         # MU for H
         numerator_H = W_new.transpose(-1, -2) @ wh_2_m
         denominator_H = W_new.transpose(-1, -2) @ wh_1 + self.eps
+        
+        if self.sparse is not None:
+            denominator_H += self.sparse
+            
         update_H = numerator_H / denominator_H
 
         # Apply learned transformation (Ah)
@@ -489,9 +493,6 @@ class RALMU_block(nn.Module):
             
         # Avoid going to zero by clamping
         H_new = torch.clamp(H_new, min=self.eps)
-        
-        if self.normalize:
-            H_new = H_new / (H_new.sum(dim=1, keepdim=True) + self.eps)
 
         if not is_batched:
             W_new = W_new.squeeze(0)
@@ -520,10 +521,10 @@ class RALMU(nn.Module):
         n_bins (int, optional): parameter for the cqt representation of W (default: ``288``)
         bins_per_octave (int, optional): parameter for the cqt representation of W (default: ``36``)
         verbose (bool, optional): whether to display some information (default: ``False``)
-        normalize (bool, optional): whether to normalize W and H (default: ``False``)
+        norm_thresh (float, optional): whether to normalize W and H (default: ``None``)
     """
     
-    def __init__(self, l=88, eps=1e-6, beta=1, W_path=None, n_iter=10, n_init_steps=100, hidden=32, use_ah=True, shared=False, n_bins=288, bins_per_octave=36, downsample=False, verbose=False, normalize=False, return_layers=True, aw_2d=False, clip_H=False, dtype=None):
+    def __init__(self, l=88, eps=1e-6, beta=1, W_path=None, n_iter=10, n_init_steps=100, hidden=32, norm_thresh=None, sparse=None, use_ah=True, shared=False, n_bins=288, bins_per_octave=36, downsample=False, verbose=False, return_layers=True, aw_2d=False, clip_H=False, dtype=None):
         super().__init__()
         
         self.n_bins          = n_bins
@@ -538,7 +539,7 @@ class RALMU(nn.Module):
         self.shared         = shared
         self.downsample     = downsample
         self.verbose        = verbose
-        self.normalize      = normalize
+        self.norm_thresh    = norm_thresh
         self.return_layers  = return_layers
         self.dtype          = dtype
 
@@ -550,25 +551,26 @@ class RALMU(nn.Module):
 
         # Unrolling layers
         self.layers = nn.ModuleList([
-            RALMU_block(eps=self.eps, shared_aw=shared_aw, shared_ah=shared_ah, use_ah=use_ah, normalize=self.normalize, aw_2d=aw_2d, clip_H=clip_H, dtype=dtype)
+            RALMU_block(eps=self.eps, shared_aw=shared_aw, shared_ah=shared_ah, use_ah=use_ah, aw_2d=aw_2d, clip_H=clip_H, sparse=sparse, dtype=dtype)
             for _ in range(self.n_iter)
         ])
     
     def forward(self, M, device=None):
         
         batch_size=None
-        if len(M.shape) == 3:
-            # Batched input (training phase)
+        if len(M.shape) == 3: # Batched input (training phase)
             batch_size, _, t = M.shape
-        elif len(M.shape) == 2:
-            # Non-batched input (inference phase)
+        elif len(M.shape) == 2: # Non-batched input (inference phase)
             _, t = M.shape
-            
-        W, _, _, _ = init.init_W(self.W_path, downsample=self.downsample, verbose=self.verbose, dtype=self.dtype)
+        
+        normalize = self.norm_thresh is not None
+        W, _, _, _ = init.init_W(self.W_path, downsample=self.downsample, normalize=normalize, verbose=self.verbose, dtype=self.dtype)
         if batch_size is not None:
             W = W.unsqueeze(0).expand(batch_size, -1, -1)
         
         H = init.init_H(self.l, t, W, M, n_init_steps=self.n_init_steps, beta=self.beta, device=device, batch_size=batch_size, dtype=self.dtype)
+        if normalize:
+            H = H/ spec.l1_norm(H, threshold=self.norm_thresh)
         
         if self.return_layers:
             W_layers = []
