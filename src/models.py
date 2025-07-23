@@ -407,14 +407,15 @@ class RALMU_block(nn.Module):
         use_ah (bool, optional): whether to use Ah in the acceleration of MU (default: ``True``)
         learnable_beta (bool, optional): whether to learn the value of beta (default: ``False``)
     """
-    def __init__(self, beta=1, eps=1e-6, shared_aw=None, shared_ah=None, use_ah=True, learnable_beta=False, aw_2d=False, clip_H=False, sparse=None, dtype=None):
+    def __init__(self, beta=1, learnable_beta=False, eps=1e-6, shared_aw=None, shared_ah=None, use_ah=True, aw_2d=False, clip_H=False, lambda_w=None, lambda_h=None, dtype=None):
         super().__init__()
         
-        self.use_ah = use_ah
-        self.aw_2d  = aw_2d
-        self.eps    = eps
-        self.clip_H = clip_H 
-        self.sparse = sparse
+        self.use_ah     = use_ah
+        self.aw_2d      = aw_2d
+        self.eps        = eps
+        self.clip_H     = clip_H 
+        self.lambda_w   = lambda_w
+        self.lambda_h   = lambda_h
         
         self.Aw = shared_aw if shared_aw is not None else (Aw_2d_cnn(dtype=dtype) if self.aw_2d else Aw_cnn())
         if self.use_ah:
@@ -447,21 +448,18 @@ class RALMU_block(nn.Module):
         numerator_W = wh_2_m @ H.transpose(-1, -2)
         denominator_W = wh_1 @ H.transpose(-1, -2) + self.eps
         
-        if self.sparse is not None:
-            denominator_W += self.sparse
+        if self.lambda_w is not None:
+            denominator_W += self.lambda_w
             
         update_W = numerator_W / denominator_W
-
-        # Apply learned transformation (Aw)
         
         # Use octave splitting to inject only intra-octave notes in Aw
         if self.aw_2d:
             octave_W = [W[:, :, :4]] + [W[:, :, i+4:i+16] for i in range(0, 84, 12)]
             accel_W = torch.cat([self.Aw(W_i)[0] for W_i in octave_W], 1)
             W_new = W * accel_W * update_W
-        else:
+        else: # Inject W column by column in Aw
             accel_W = torch.cat([self.Aw(W[:, :, i]) for i in range(88)], 2)
-            # print(self.Aw(W[:,:,0]).shape, accel_W.shape)
             W_new = W * accel_W * update_W
             
         # Avoid going to zero by clamping    
@@ -478,12 +476,12 @@ class RALMU_block(nn.Module):
         numerator_H = W_new.transpose(-1, -2) @ wh_2_m
         denominator_H = W_new.transpose(-1, -2) @ wh_1 + self.eps
         
-        if self.sparse is not None:
-            denominator_H += self.sparse
+        if self.lambda_h is not None:
+            denominator_H += self.lambda_h
             
         update_H = numerator_H / denominator_H
 
-        # Apply learned transformation (Ah)
+        # Apply learned acceleration (Ah)
         if self.use_ah:
             H_rows = [H[:, i:i+1, :] for i in range(0, 88)]
             accel_H = torch.cat([self.Ah(H_i) for H_i in H_rows], 1)
@@ -510,7 +508,6 @@ class RALMU(nn.Module):
     
     Args:
         l (int, optional): the amount of distinct single notes to transcribe (default: ``88``)
-        eps (int, optional): min value for MU computations (default: ``1e-6``)
         beta (int, optional): value for the β-divergence (default: ``1`` = KL divergence)
         W_path (str, optional): the path to the folder containing the recording of all the  notes. If ``None``, W is initialized with artificial data (default: ``None``)
         n_iter (int, optional): the number of unrolled iterations of MU (default: ``10``)
@@ -518,20 +515,15 @@ class RALMU(nn.Module):
         hidden (int, optional): the size of the CNN filters (default: ``32``)
         use_ah (bool, optional): whether to use Ah in the acceleration of MU (default: ``True``)
         shared (bool, optional): whether Ah and Aw are shared across layers (default: ``False``)
-        n_bins (int, optional): parameter for the cqt representation of W (default: ``288``)
-        bins_per_octave (int, optional): parameter for the cqt representation of W (default: ``36``)
         verbose (bool, optional): whether to display some information (default: ``False``)
         norm_thresh (float, optional): whether to normalize W and H (default: ``None``)
     """
     
-    def __init__(self, l=88, eps=1e-6, beta=1, W_path=None, n_iter=10, n_init_steps=100, hidden=32, norm_thresh=None, sparse=None, use_ah=True, shared=False, n_bins=288, bins_per_octave=36, downsample=False, verbose=False, return_layers=True, aw_2d=False, clip_H=False, dtype=None):
+    def __init__(self, l=88, beta=1, learnable_beta=False, W_path=None, n_iter=10, n_init_steps=100, hidden=32, use_ah=True, shared=False, aw_2d=False, clip_H=False, norm_thresh=0.01, lambda_w=None, lambda_h=None, downsample=False, return_layers=True, dtype=None, verbose=False):
         super().__init__()
         
-        self.n_bins          = n_bins
-        self.bins_per_octave = bins_per_octave
-        
         self.l              = l
-        self.eps            = eps
+        self.eps            = 1e-6 # min value for MU
         self.beta           = beta
         self.W_path         = W_path
         self.n_iter         = n_iter
@@ -551,7 +543,7 @@ class RALMU(nn.Module):
 
         # Unrolling layers
         self.layers = nn.ModuleList([
-            RALMU_block(eps=self.eps, shared_aw=shared_aw, shared_ah=shared_ah, use_ah=use_ah, aw_2d=aw_2d, clip_H=clip_H, sparse=sparse, dtype=dtype)
+            RALMU_block(eps=self.eps, shared_aw=shared_aw, shared_ah=shared_ah, use_ah=use_ah, learnable_beta=learnable_beta, aw_2d=aw_2d, clip_H=clip_H, lambda_w=lambda_w, lambda_h=lambda_h, dtype=dtype)
             for _ in range(self.n_iter)
         ])
     

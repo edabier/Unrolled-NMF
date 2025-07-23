@@ -55,7 +55,9 @@ def save_audio(row, save_path, downsample, dtype):
             midi = init.MIDI_to_H(midi, active_midi, onset, offset)
         
         torch.save(M, f"{save_path}/M/{file_name}")
-        torch.save(midi, f"{save_path}/H/{file_name}")
+        torch.save(midi, f"{save_path}/H/midi/{file_name}")
+        torch.save(onset, f"{save_path}/H/onsets/{file_name}")
+        torch.save(offset, f"{save_path}/H/offsets/{file_name}")
     except Exception as e:
         print(f"Skipping {file_name} due to error: {e}")
         return

@@ -12,6 +12,7 @@ import mir_eval
 from tqdm import tqdm
 import subprocess, csv
 from datetime import datetime
+from time import time
 from scipy.optimize import linear_sum_assignment
 
 import src.spectrograms as spec
@@ -198,6 +199,111 @@ def collate_fn(batch):
     # Return them as lists to avoid stacking
     return audio_files_padded, midi_files_padded      
 
+class LocalMapsDataset(Dataset):
+    """
+    Creates a Dataset object from localy saved CQT + midi
+
+    Args:
+        folder_path (pd.DataFrame): DataFrame containing 'file_path', 'midi_path', 'onset_path' and 'offset_path' columns.
+        dev: The device on which to load the dataset (default: None)
+        sr (int, optional): The sample rate of the recordings to convert the fixed_length in cqt steps (default: 22050)
+        hop_length (int, optional): The hop_length to convert the fixed_length in cqt steps (default: 128)
+        fixed_length (bool, optional): Whether to have a constant duration for audio/MIDI items (default: True).
+        subset (float, optional): The subset of files to include in the dataset. If None, all files are used (default: None).
+    """
+    def __init__(self, metadata, dev=None, sr=22050, hop_length=128, fixed_length=None, subset=None, dtype=None, verbose=False):
+
+        self.metadata    = metadata
+        self.dev            = dev if dev is not None else torch.device('cpu')
+        self.sr             = sr
+        self.hop_length     = hop_length
+        self.fixed_length   = fixed_length
+        self.dtype          = dtype
+        
+        # M_path = self.folder_path + "/M"
+        # H_path = self.folder_path + "/H"
+        # self.M_files = [M_path + "/" + f for f in os.listdir(M_path) if os.path.isfile(os.path.join(M_path, f))]
+        # self.H_files = [H_path + "/midi/" + f for f in os.listdir(H_path+"/midi") if os.path.isfile(os.path.join(H_path, "midi", f))]
+        # self.onsets_files = [H_path + "/onsets/" + f for f in os.listdir(H_path+"/onsets") if os.path.isfile(os.path.join(H_path, "onsets", f))]
+        # self.offsets_files = [H_path + "/offsets/" + f for f in os.listdir(H_path+"/offsets") if os.path.isfile(os.path.join(H_path, "offsets", f))]
+        
+        # if verbose:
+        #     print(f"There are: {len(self.M_files)} M files, and {len(self.H_files)} H files")
+        # assert len(self.M_files)==len(self.H_files), "There should be as many M files as H"
+
+        # if subset is not None:
+        #     num_files = int(len(self.M_files) * subset)
+        #     self.M_files = self.M_files[:num_files]
+        #     self.H_files = self.H_files[:num_files]
+        #     self.onsets_files = self.onsets_files[:num_files]
+        #     self.offsets_files = self.offsets_files[:num_files]
+        if subset is not None:
+            num_files = int(len(self.metadata) * subset)
+            self.metadata = self.metadata[:num_files]
+
+        if self.fixed_length is not None:
+            self.segment_indices = self.compute_length()
+            
+    def compute_length(self):
+        self.fixed_length = math.ceil((self.fixed_length * self.sr) / self.hop_length)
+        segment_indices = []
+        # for i in self.M_files:
+        for _, row in tqdm(self.metadata.iterrows()):
+            # M = torch.load(i, map_location=self.dev)
+            M = torch.load(row.file_path, map_location=self.dev)
+            segment_indices.append(-(M.shape[1] // -self.fixed_length))
+        return segment_indices
+    
+    def __len__(self):
+        # return len(self.M_files)
+        return len(self.metadata)
+    
+    def __getitem__(self, idx):
+        if idx >= len(self):
+            raise IndexError("Index out of range")
+        
+        if self.fixed_length is not None:
+            cumulative_indices = np.cumsum(self.segment_indices)
+            file_idx = np.searchsorted(cumulative_indices, idx, side='right')
+            audio_idx = idx - cumulative_indices[file_idx - 1] if file_idx > 0 else idx
+            
+            row = self.metadata.iloc[file_idx]
+            
+            # M = torch.load(self.M_files[idx], map_location=self.dev)
+            # H = torch.load(self.H_files[idx], map_location=self.dev)
+            # onset = torch.load(self.onsets_files[idx], map_location=self.dev)
+            # offset = torch.load(self.offsets_files[idx], map_location=self.dev)
+            M = torch.load(row.file_path, map_location=self.dev)
+            H = torch.load(row.midi_path, map_location=self.dev)
+            onset = torch.load(row.onset_path, map_location=self.dev)
+            offset = torch.load(row.offset_path, map_location=self.dev)
+            
+            start_idx = audio_idx * self.fixed_length
+            end_idx = start_idx + self.fixed_length
+            
+            # Ensure that the end index does not exceed the length of the data
+            if end_idx > M.shape[1]:
+                end_idx = M.shape[1]
+
+            M_segment = M[:, start_idx:end_idx]
+            H_segment, _, _ = spec.cut_midi_segment(H, onset, offset, start_idx, end_idx)
+            
+            # Pad the last segment if necessary
+            if M_segment.shape[1] < self.fixed_length:
+                M_segment = pad_by_repeating(M_segment, self.fixed_length)
+                H_segment = pad_by_repeating(H_segment, self.fixed_length)
+
+            return M_segment, H_segment
+        
+        else:
+            # M = torch.load(self.M_files[idx])
+            # H = torch.load(self.H_files[idx])
+            
+            row = self.metadata.iloc[idx]
+            M = torch.load(row.file_path, map_location=self.dev)
+            H = torch.load(row.midi_path, map_location=self.dev)
+            return M, H
+
 class MapsDataset(Dataset):
     """
     Creates a Dataset object from Maps' metadata
@@ -259,7 +365,6 @@ class MapsDataset(Dataset):
                 downsample_rate = sr//2
                 downsampler = torchaudio.transforms.Resample(sr, downsample_rate, dtype=waveform.dtype)
                 waveform = downsampler(waveform)
-                sr = downsample_rate
             
             _, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length)
             
@@ -292,7 +397,6 @@ class MapsDataset(Dataset):
                     downsample_rate = sr//2
                     downsampler = torchaudio.transforms.Resample(sr, downsample_rate, dtype=waveform.dtype)
                     waveform = downsampler(waveform)
-                    sr = downsample_rate
                     
                 M, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length, normalize_thresh=self.norm_thresh, dtype=self.dtype)
                 midi, onset, offset, _ = spec.midi_to_pianoroll(row['midi_path'], waveform, times_cqt, self.hop_length, dtype=self.dtype)
@@ -332,7 +436,6 @@ class MapsDataset(Dataset):
                     downsample_rate = sr//2
                     downsampler = torchaudio.transforms.Resample(sr, downsample_rate, dtype=waveform.dtype)
                     waveform = downsampler(waveform)
-                    sr = downsample_rate
                     
                 M, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length, normalize_thresh=self.norm_thresh, dtype=self.dtype)
                 midi, onset, offset, _ = spec.midi_to_pianoroll(row['midi_path'], waveform, times_cqt, self.hop_length, sr, dtype=self.dtype)
@@ -347,6 +450,7 @@ class MapsDataset(Dataset):
             except Exception as e:
                 print(f"Skipping {row['midi_path']} due to error: {e}")
                 return self.__getitem__((idx + 1) % len(self))
+
 
 """
 Metrics
@@ -714,6 +818,7 @@ def compute_midi_loss_batch(midi_hat, midi_gt, active_midi, octave_weight, note_
     print(f"Losses: onset= {l_onset}, offset= {l_offset}, pitch= {l_pitch}, total= {loss}, normalized= {normalized_loss}")
     
     return normalized_loss
+   
    
 """
 Train the network

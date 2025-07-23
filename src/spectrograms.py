@@ -270,6 +270,47 @@ def vis_erb_spectrogram(spec, freqs, times, start, stop):
 """
 MIDI processing
 """
+def midi_to_pianoroll_tensor(midi_path, waveform, times, hop_length, sr=16000, dtype=None):
+    midi = pretty_midi.PrettyMIDI(midi_path)
+    
+    n_tracks = len(midi.instruments)
+
+    # Keep only piano keys (A0-C8)
+    note_start = 21
+    note_end = 109
+
+    # Get the piano roll from PrettyMIDI
+    piano_roll = midi.get_piano_roll(fs=sr / hop_length)[note_start:note_end]
+    
+    # Generate time axis for the MIDI file
+    num_samples = waveform.shape[0]
+    duration = num_samples / sr
+    # times = torch.from_numpy(times)
+    
+    original_times = np.linspace(0, times[-1], piano_roll.shape[1])
+    interp_func = interp1d(original_times, piano_roll, axis=1, kind='nearest', fill_value=0, bounds_error=False)
+    piano_roll = interp_func(times)
+    
+    piano_roll = torch.from_numpy(piano_roll > 0).to(dtype)
+    
+    onsets = torch.zeros_like(piano_roll, dtype=dtype)
+    offsets = torch.zeros_like(piano_roll, dtype=dtype)
+
+    # Fill onset and offset matrices
+    for instrument in midi.instruments:
+        for note in instrument.notes:
+            note_idx = note.pitch - note_start
+            onset_idx = torch.argmin(torch.abs(times - note.start))
+            offset_idx = torch.argmin(torch.abs(times - note.end))
+            onsets[note_idx, onset_idx] = 1
+            offsets[note_idx, offset_idx] = 1
+            # if onset_idx < onsets.shape[1]:
+            #     onsets[note_idx, onset_idx] = 1
+            # if offset_idx < offsets.shape[1]:
+            #     offsets[note_idx, offset_idx] = 1
+
+    return piano_roll, onsets, offsets, times
+
 def midi_to_pianoroll(midi_path, waveform, times, hop_length, sr=16000, dtype=None):
     midi = pretty_midi.PrettyMIDI(midi_path)
     
@@ -285,7 +326,6 @@ def midi_to_pianoroll(midi_path, waveform, times, hop_length, sr=16000, dtype=No
     # Generate time axis for the MIDI file
     num_samples = waveform.shape[0]
     duration = num_samples / sr
-    # times = np.linspace(0, duration, n_time_steps)
     
     original_times = np.linspace(0, times[-1], piano_roll.shape[1])
     interp_func = interp1d(original_times, piano_roll, axis=1, kind='nearest', fill_value=0, bounds_error=False)
