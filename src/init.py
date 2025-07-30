@@ -17,7 +17,7 @@ def first_non_zero(f0):
     non_zero    = torch.argmax(f0_2, 0, keepdim=True)
     return non_zero
 
-def init_W(folder_path=None, hop_length=128, bins_per_octave=36, n_bins=288, downsample=False, verbose=False, normalize=True, dtype=None):
+def init_W(folder_path=None, hop_length=128, bins_per_octave=36, n_bins=288, downsample=False, verbose=False, normalize_thresh=None, eps=1e-6, dtype=None):
     """
     Create a W matrix from all audio files contained in the input path
     By taking the column of highest energy of the CQT
@@ -48,7 +48,7 @@ def init_W(folder_path=None, hop_length=128, bins_per_octave=36, n_bins=288, dow
             assert duration >= min_duration, f"Audio file {fname} is too short. Duration: {duration:.2f}s, Required: {min_duration:.2f}s"
             
             spec_cqt, _, freq = spec.cqt_spec(y, sample_rate=sr, hop_length=hop_length,
-                                    bins_per_octave=bins_per_octave, n_bins=n_bins, dtype=dtype)
+                                    bins_per_octave=bins_per_octave, n_bins=n_bins, normalize_thresh=normalize_thresh, eps=eps, dtype=dtype)
             
             if len(fname) == 7:
                 note, octave = fname[0:2], int(fname[2])
@@ -73,8 +73,8 @@ def init_W(folder_path=None, hop_length=128, bins_per_octave=36, n_bins=288, dow
         # W of shape f * (88*n)
         W = torch.stack(templates, axis=1)
         
-        if normalize:
-            W = W/ torch.sum(torch.abs(W), dim=0, keepdim=True)
+        # if normalize:
+        #     W = W/ torch.sum(torch.abs(W), dim=0, keepdim=True)
         
         if verbose:
             print("Initialized W for the model from files")
@@ -137,7 +137,9 @@ def midi_to_hz(midi_note):
 def frequency_to_note(frequency, thresh):
     """
     Map a frequency to its corresponding musical note.
-    We add a semitones thresholding to account for small variations in the frequency
+    
+    Args:
+        thresh (float): Threshold in semitones to account for small variations in the frequency
     """
     
     frequency = torch.tensor(frequency, dtype=torch.float32)
@@ -154,7 +156,13 @@ def frequency_to_note(frequency, thresh):
 def W_to_pitch(W, true_freqs, thresh=0.4, H=None, use_max=False, sort=False):
     """
     Assign a pitch to every column of W.
-    freqs being the frequency correspondence of every column's sample.
+    
+    Args:
+        W (torch.tensor): The W tensor (notes' spectrograms dictionnary)
+        true_freqs (list): The true frequency correspondence of every W column's spectrogram
+        thresh (float, optional): Threshold for the conversion from frequency to note (default: ``0.4``)
+        us_max (bool, optional): Whether to take the maximum value of each CQT column as the fundamental frequency or select the expected frequency instead
+        sort (bool, optional): Whether to sort the frequencies and W columns by increasing order or not
     """
     true_freqs.sort()    
     frequencies = torch.empty(W.shape[1], dtype=torch.float32)
@@ -196,9 +204,16 @@ def W_to_pitch(W, true_freqs, thresh=0.4, H=None, use_max=False, sort=False):
     else:
         return frequencies, notes
   
-def WH_to_MIDI(W, H, notes, threshold=0.02, smoothing_window=5, adaptative=False, normalize=True):
+def WH_to_MIDI(W, H, notes, threshold=0.02, smoothing_window=None, normalize=True):
     """
     Form a MIDI format tensor from W and H
+    
+    Args:
+        W (torch.tensor): The W tensor (notes' spectrograms dictionnary)
+        H (torch.tensor): The H tensor (notes activations)
+        notes (torch.tensor): the amount of distinct single notes to transcribe
+        threshold (float, optional): The minimum value under which to discard a potential note (default: ``0.02``)
+        smoothing_window (float, optional): The size of the window to take the average activation of to adapt the threshold (default: ``None``)
     """
     midi = torch.zeros((88, H.shape[1]), dtype=torch.float32)
     
@@ -216,19 +231,12 @@ def WH_to_MIDI(W, H, notes, threshold=0.02, smoothing_window=5, adaptative=False
     
     for midi_note, activation in activations.items():
         if midi_note <= 108:
-            if adaptative:
+            if smoothing_window is not None:
                 dynamic_threshold = threshold + torch.mean(activation[:smoothing_window])
                 active_indices = activation > dynamic_threshold
             else:
                 active_indices = activation > threshold
             midi[midi_note, active_indices] = activation[active_indices]
-            # if adaptative:
-            #     dynamic_threshold = threshold + torch.mean(activation[:smoothing_window])
-            # else:
-            #     dynamic_threshold = threshold
-            # # Use a sigmoid function for smooth thresholding
-            # smooth_activation = torch.sigmoid((activation - dynamic_threshold) / 0.1)
-            # midi[midi_note, :] = smooth_activation * activation
             
             diff = torch.diff(active_indices.float())
             start_indices = torch.where(diff == 1)[0] + 1
@@ -251,31 +259,6 @@ def WH_to_MIDI(W, H, notes, threshold=0.02, smoothing_window=5, adaptative=False
     active_midi = [i for i in range(88) if (midi[i,:]>0).any().item()]
     
     return midi, active_midi
-
-# def MIDI_to_H(midi, active_midi):
-#     onsets, offsets = utils.detect_onset_offset(midi)
-#     H = torch.zeros_like(midi, dtype=torch.float)
-    
-#     for note in active_midi:
-#             # Get indices of onsets and offsets and ensure they are 1D tensors
-#             onset_indices = torch.nonzero(onsets[note, :], as_tuple=False).squeeze()
-#             offset_indices = torch.nonzero(offsets[note, :], as_tuple=False).squeeze()
-            
-#             if onset_indices.dim() > 0 and offset_indices.dim() > 0:
-#                 if len(offset_indices) < len(onset_indices):
-#                     offset_indices = torch.cat([offset_indices, torch.tensor([midi.shape[1] - 1])])
-                    
-#                 for onset_idx_item, offset_idx_item in zip(onset_indices, offset_indices):
-#                     onset_idx = onset_idx_item.item()
-#                     offset_idx = offset_idx_item.item()
-
-#                     if onset_idx < offset_idx:
-#                         decay_length = offset_idx - onset_idx
-#                         # Linear decay from 127 to 0
-#                         decay = torch.linspace(127, 0, steps=decay_length)
-#                         H[note, onset_idx:offset_idx] = decay
-
-#     return H
 
 def MIDI_to_H(midi, active_midi, onsets=None, offsets=None):
     if onsets == None:

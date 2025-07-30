@@ -1,5 +1,6 @@
 from adasp_data_management import music
 import numpy as np
+import pandas as pd
 import memory_profiler
 import torchaudio
 import torch
@@ -36,7 +37,7 @@ def compute_lengths(metadata, hop_length, downsample):
         
     return np.array(durations), segment_indices, time_steps
 
-def save_audio(row, save_path, downsample, dtype):
+def save_audio(metadata_list, row, save_path, downsample, dtype):
     file_name = row['file_path'].split('/MAPS_')[1][:-4] + ".pt"
     try:
         waveform, sr = torchaudio.load(row['file_path'])
@@ -45,7 +46,6 @@ def save_audio(row, save_path, downsample, dtype):
             downsample_rate = sr//2
             downsampler = torchaudio.transforms.Resample(sr, downsample_rate, dtype=waveform.dtype)
             waveform = downsampler(waveform)
-            sr = downsample_rate
             
         M, times_cqt, _ = spec.cqt_spec(waveform, sr, hop_length, dtype=dtype)
         midi, onset, offset, _ = spec.midi_to_pianoroll(row['midi_path'], waveform, times_cqt, hop_length, sr, dtype=dtype)
@@ -53,6 +53,15 @@ def save_audio(row, save_path, downsample, dtype):
         if use_H:
             active_midi = [i for i in range(88) if (midi[i, :] > 0).any().item()]
             midi = init.MIDI_to_H(midi, active_midi, onset, offset)
+        
+        metadata_list.append({
+            "file_path": f"{save_path}/M/{file_name}",
+            "midi_path": f"{save_path}/H/midi/{file_name}",
+            "onset_path": f"{save_path}/H/onsets/{file_name}",
+            "offset_path": f"{save_path}/H/offsets/{file_name}",
+            "duration": waveform.shape[1]/sr,
+            "time_steps": times_cqt.shape[0]
+        })
         
         torch.save(M, f"{save_path}/M/{file_name}")
         torch.save(midi, f"{save_path}/H/midi/{file_name}")
@@ -110,10 +119,14 @@ if __name__ == "__main__":
     
     print("Computing and saving the CQT...", len(metadata))
     save_path = 'AMT/Unrolled-NMF/MAPS'
+    metadata_list = []
     for idx in tqdm(range(len(metadata))):
         row = metadata.iloc[idx]
         if idx%5 == 0:
             gpu_info = utils.get_gpu_info()
             utils.log_gpu_info(gpu_info, filename="AMT/Unrolled-NMF/logs/gpu_info_log.csv")
-        save_audio(row, save_path, downsample, dtype)
+        save_audio(metadata_list, row, save_path, downsample, dtype)
+    
+    metadata_df = pd.DataFrame(metadata_list)
+    metadata_df.to_csv(f'{save_path}/metadata.csv', index=False)
     

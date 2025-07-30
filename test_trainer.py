@@ -6,6 +6,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
+import torch.multiprocessing as mp
 from sklearn.model_selection import train_test_split
 from adasp_data_management import music
 import wandb
@@ -20,9 +21,10 @@ import src.models as models
 import src.spectrograms as spec
 import src.init as init
 
-
-@profile
-def main(num_workers, n_iter, lr, epochs, batch, length, filter, subset, split):
+def main(num_workers, n_iter, lr, epochs, batch, length, subset, split):
+    
+    # Set the multiprocessing start method
+    mp.set_start_method('spawn', force=True)
     
     dtype = torch.float16
     shared = True
@@ -46,40 +48,32 @@ def main(num_workers, n_iter, lr, epochs, batch, length, filter, subset, split):
 
     train_data, test_data   = train_test_split(metadata, train_size=split, random_state=1)
     train_data, valid_data  = train_test_split(train_data, train_size=split, random_state=1)
+    train_data = train_data.reset_index(drop=True)
+    test_data = test_data.reset_index(drop=True)
+    valid_data = valid_data.reset_index(drop=True)
     print("Split the dataset - done ✓")
     
-    train_set   = utils.LocalMapsDataset(train_data, dev=dev, fixed_length=length, subset=subset, verbose=False, dtype=dtype)
-    print("Loaded the train dataset - done ✓")
-    test_set    = utils.LocalMapsDataset(test_data, dev=dev, fixed_length=length, subset=subset, verbose=False, dtype=dtype)
-    print("Loaded the test dataset - done ✓")
-    valid_set   = utils.LocalMapsDataset(valid_data, dev=dev, fixed_length=length, subset=subset, verbose=False, dtype=dtype)
-    print("Loaded the valid dataset - done ✓")
-
-    # train_set   = utils.MapsDataset(train_data, use_H=True, fixed_length=length, subset=subset, verbose=False, sort=filter, filter=filter, dtype=dtype)
-    # print("Loaded the train dataset - done ✓")
-    # test_set    = utils.MapsDataset(test_data, use_H=True, fixed_length=length, subset=subset, verbose=False, sort=filter, filter=filter, dtype=dtype)
-    # print("Loaded the test dataset - done ✓")
-    # valid_set   = utils.MapsDataset(valid_data, use_H=True, fixed_length=length, subset=subset, verbose=False, sort=filter, filter=filter, dtype=dtype)
-    # print("Loaded the valid dataset - done ✓")
+    train_set   = utils.LocalMapsDataset(train_data, fixed_length=length, subset=subset, verbose=False, dtype=dtype)
+    # test_set    = utils.LocalMapsDataset(test_data, fixed_length=length, subset=subset, verbose=False, dtype=dtype)
+    valid_set   = utils.LocalMapsDataset(valid_data, fixed_length=length, subset=subset, verbose=False, dtype=dtype)
+    print("Loaded the datasets - done ✓")
 
     train_sampler   = utils.SequentialBatchSampler(train_set, batch_size=batch)
     train_loader    = DataLoader(train_set, batch_sampler=train_sampler, collate_fn=utils.collate_fn, num_workers=num_workers)
-    print(f"Created the train dataloader with {num_workers} workers- done ✓")
-
-    test_sampler   = utils.SequentialBatchSampler(test_set, batch_size=batch)
-    test_loader     = DataLoader(test_set, batch_sampler=test_sampler, collate_fn=utils.collate_fn, num_workers=num_workers)
-    print("Created the test dataloader - done ✓")
+    
+    # test_sampler   = utils.SequentialBatchSampler(test_set, batch_size=batch)
+    # test_loader     = DataLoader(test_set, batch_sampler=test_sampler, collate_fn=utils.collate_fn, num_workers=num_workers)
 
     valid_sampler   = utils.SequentialBatchSampler(valid_set, batch_size=batch)
     valid_loader    = DataLoader(valid_set, batch_sampler=valid_sampler, collate_fn=utils.collate_fn, num_workers=num_workers)
-    print("Created the valid dataloader - done ✓")
+    print("Created the dataloaders - done ✓")
 
     print(f"Train dataset: {len(train_loader)}, valid dataset: {len(valid_loader)}")
 
     print("Loading the model...")
     W_path = 'AMT/Unrolled-NMF/test-data/synth-single-notes'
     ralmu = models.RALMU(l=88, beta=1, W_path=W_path, n_iter=n_iter, n_init_steps=1, shared=shared, return_layers=False, aw_2d=aw2d, clip_H=clip, dtype=dtype)
-    ralmu = ralmu.cuda(device=dev)
+    ralmu = ralmu.to(dev)
 
     ##########################################################
     print("Preparing the training...")
@@ -88,7 +82,7 @@ def main(num_workers, n_iter, lr, epochs, batch, length, filter, subset, split):
 
     print("Starting training...")
 
-    losses, valid_losses, W_hat, H_hat = utils.train(ralmu, train_loader, valid_loader, optimizer, criterion, dev, epochs)
+    losses, valid_losses, W_hat, H_hat = utils.train(ralmu, train_loader, valid_loader, optimizer, criterion, dev, epochs, use_wandb=True)
 
     print("Training complete!")
 
@@ -112,11 +106,13 @@ if __name__ == '__main__':
     epochs = args.epochs
     batch_size = args.batch
     fixed_length = args.length
-    filter = args.filter
+    # filter = args.filter
     subset = args.subset
     split = args.split
     
-    main(num_workers, n_iter, lr, epochs, batch_size, fixed_length, filter, subset, split)
+    print(f"Starting test_trainer.py with arguments: num_workers={num_workers}, n_iter={n_iter}, lr={lr}, epochs={epochs}, batch_size={batch_size}, fixed_length={fixed_length}, subset={subset} and split={split}")
+    
+    main(num_workers, n_iter, lr, epochs, batch_size, fixed_length, subset, split)
     
     # #########################################################
     # print("Loading the dataset...")

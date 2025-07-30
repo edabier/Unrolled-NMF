@@ -14,6 +14,8 @@ import subprocess, csv
 from datetime import datetime
 from time import time
 from scipy.optimize import linear_sum_assignment
+import memory_profiler
+import fcntl
 
 import src.spectrograms as spec
 import src.init as init
@@ -168,7 +170,7 @@ class SequentialBatchSampler(Sampler):
         return iter(self.batches)
 
     def __len__(self):
-        return len(self.data_source) // self.batch_size
+        return math.ceil(len(self.data_source) / self.batch_size)#len(self.data_source) // self.batch_size
     
 def pad_by_repeating(tensor, max_length):
     current_length = tensor.size(1)
@@ -219,64 +221,58 @@ class LocalMapsDataset(Dataset):
         self.hop_length     = hop_length
         self.fixed_length   = fixed_length
         self.dtype          = dtype
+        # self._cached_data = {}
         
-        # M_path = self.folder_path + "/M"
-        # H_path = self.folder_path + "/H"
-        # self.M_files = [M_path + "/" + f for f in os.listdir(M_path) if os.path.isfile(os.path.join(M_path, f))]
-        # self.H_files = [H_path + "/midi/" + f for f in os.listdir(H_path+"/midi") if os.path.isfile(os.path.join(H_path, "midi", f))]
-        # self.onsets_files = [H_path + "/onsets/" + f for f in os.listdir(H_path+"/onsets") if os.path.isfile(os.path.join(H_path, "onsets", f))]
-        # self.offsets_files = [H_path + "/offsets/" + f for f in os.listdir(H_path+"/offsets") if os.path.isfile(os.path.join(H_path, "offsets", f))]
-        
-        # if verbose:
-        #     print(f"There are: {len(self.M_files)} M files, and {len(self.H_files)} H files")
-        # assert len(self.M_files)==len(self.H_files), "There should be as many M files as H"
-
-        # if subset is not None:
-        #     num_files = int(len(self.M_files) * subset)
-        #     self.M_files = self.M_files[:num_files]
-        #     self.H_files = self.H_files[:num_files]
-        #     self.onsets_files = self.onsets_files[:num_files]
-        #     self.offsets_files = self.offsets_files[:num_files]
         if subset is not None:
             num_files = int(len(self.metadata) * subset)
             self.metadata = self.metadata[:num_files]
 
         if self.fixed_length is not None:
-            self.segment_indices = self.compute_length()
+            self.metadata.loc[:,'segment_indices'] = self.compute_length()
             
     def compute_length(self):
         self.fixed_length = math.ceil((self.fixed_length * self.sr) / self.hop_length)
         segment_indices = []
-        # for i in self.M_files:
         for _, row in tqdm(self.metadata.iterrows()):
-            # M = torch.load(i, map_location=self.dev)
             M = torch.load(row.file_path, map_location=self.dev)
             segment_indices.append(-(M.shape[1] // -self.fixed_length))
         return segment_indices
     
     def __len__(self):
-        # return len(self.M_files)
-        return len(self.metadata)
+        if self.fixed_length is not None:
+            return sum(self.metadata.segment_indices)
+        else:
+            return len(self.metadata)
+    
+    def safe_load(self, path):
+        with open(path, 'rb') as f:
+            fcntl.flock(f, fcntl.LOCK_SH)
+            data = torch.load(f, map_location=self.dev)
+            fcntl.flock(f, fcntl.LOCK_UN)
+        return data
     
     def __getitem__(self, idx):
         if idx >= len(self):
             raise IndexError("Index out of range")
         
+        # if idx in self._cached_data:
+        #     return self._cached_data[idx]
+        
         if self.fixed_length is not None:
-            cumulative_indices = np.cumsum(self.segment_indices)
+            cumulative_indices = np.cumsum(self.metadata.segment_indices)
             file_idx = np.searchsorted(cumulative_indices, idx, side='right')
             audio_idx = idx - cumulative_indices[file_idx - 1] if file_idx > 0 else idx
             
             row = self.metadata.iloc[file_idx]
             
-            # M = torch.load(self.M_files[idx], map_location=self.dev)
-            # H = torch.load(self.H_files[idx], map_location=self.dev)
-            # onset = torch.load(self.onsets_files[idx], map_location=self.dev)
-            # offset = torch.load(self.offsets_files[idx], map_location=self.dev)
-            M = torch.load(row.file_path, map_location=self.dev)
-            H = torch.load(row.midi_path, map_location=self.dev)
-            onset = torch.load(row.onset_path, map_location=self.dev)
-            offset = torch.load(row.offset_path, map_location=self.dev)
+            M = self.safe_load(row.file_path).to(self.dtype)
+            H = self.safe_load(row.midi_path).to(self.dtype)
+            onset = self.safe_load(row.onset_path).to(self.dtype)
+            offset = self.safe_load(row.offset_path).to(self.dtype)
+            # M = torch.load(row.file_path, map_location=self.dev).to(self.dtype)
+            # H = torch.load(row.midi_path, map_location=self.dev).to(self.dtype)
+            # onset = torch.load(row.onset_path, map_location=self.dev).to(self.dtype)
+            # offset = torch.load(row.offset_path, map_location=self.dev).to(self.dtype)
             
             start_idx = audio_idx * self.fixed_length
             end_idx = start_idx + self.fixed_length
@@ -292,16 +288,18 @@ class LocalMapsDataset(Dataset):
             if M_segment.shape[1] < self.fixed_length:
                 M_segment = pad_by_repeating(M_segment, self.fixed_length)
                 H_segment = pad_by_repeating(H_segment, self.fixed_length)
+                
+            # self._cached_data[idx] = (M_segment, H_segment)
 
             return M_segment, H_segment
         
         else:
-            # M = torch.load(self.M_files[idx])
-            # H = torch.load(self.H_files[idx])
-            
             row = self.metadata.iloc[idx]
-            M = torch.load(row.file_path, map_location=self.dev)
-            H = torch.load(row.midi_path, map_location=self.dev)
+            # M = torch.load(row.file_path, map_location=self.dev).to(self.dtype)
+            # H = torch.load(row.midi_path, map_location=self.dev).to(self.dtype)
+            M = self.safe_load(row.file_path).to(self.dtype)
+            H = self.safe_load(row.midi_path).to(self.dtype)
+            # self._cached_data = (M,H)
             return M, H
 
 class MapsDataset(Dataset):
@@ -314,9 +312,9 @@ class MapsDataset(Dataset):
         use_H (bool, optional): Whether to use pianoroll MIDI or H matrix as dataset's item (default: False).
         fixed_length (bool, optional): Whether to have a constant duration for audio/MIDI items (default: True).
         subset (float, optional): The subset of files to include in the dataset. If None, all files are used (default: None).
-        filter (bool, optional): Whether to filter the dataset to keep only files with length > mean(length) (default: `False`)
+        filter (int, optional): Min duration of files under which to filter the dataset (default: `None`)
     """
-    def __init__(self, metadata, hop_length=128, use_H=False, fixed_length=None, subset=None, sort=True, filter=False, downsample=False, norm_thresh=0.1, verbose=False, dtype=None):
+    def __init__(self, metadata, hop_length=128, use_H=False, fixed_length=None, subset=None, sort=True, filter_length=None, downsample=False, norm_thresh=0.1, verbose=False, dtype=None):
         assert 'file_path' in metadata.columns and 'midi_path' in metadata.columns, "Metadata should contain 'file_path' and 'midi_path' columns."
 
         self.metadata = metadata.copy()
@@ -324,6 +322,7 @@ class MapsDataset(Dataset):
         self.use_H = use_H
         self.fixed_length = fixed_length
         self.sort = sort
+        self.filter = filter_length
         self.downsample = downsample
         self.nom_thresh = norm_thresh
         self.dtype = dtype
@@ -335,17 +334,18 @@ class MapsDataset(Dataset):
         if self.sort:
             if verbose:
                 print("Computing the length of files...")
-            durations, self.segment_indices, time_steps = self._compute_lengths()
+            durations, segment_indices, time_steps = self._compute_lengths()
             self.metadata.loc[:, 'duration'] = durations
             self.metadata.loc[:, 'time_steps'] = time_steps
+            self.metadata.loc[:, 'segment_indices'] = segment_indices
             self.metadata = self.metadata.sort_values(by='duration')
             
-            if filter and self.fixed_length is not None:
-                filter_condition = self.metadata['time_steps'] > self.fixed_length
-                indices = self.metadata.index.to_list()
+            if self.filter is not None:
+                filter_condition = self.metadata['duration'] > self.filter
+                # indices = self.metadata.index.to_list()
                 
                 self.metadata = self.metadata[filter_condition].reset_index(drop=True)
-                self.segment_indices = [self.segment_indices[i] for i, idx in enumerate(indices) if filter_condition[idx]]
+                # self.segment_indices = [self.segment_indices[i] for i, idx in enumerate(indices) if filter_condition[idx]]
         
             self.min_length = fixed_length
     
@@ -377,7 +377,7 @@ class MapsDataset(Dataset):
 
     def __len__(self):
         if self.fixed_length:
-            return sum(self.segment_indices)
+            return sum(self.metadata.segment_indices)
         else:
             return len(self.metadata)
 
@@ -386,7 +386,7 @@ class MapsDataset(Dataset):
             raise IndexError("Index out of range")
         
         if self.fixed_length is not None:
-            cumulative_indices = np.cumsum(self.segment_indices)
+            cumulative_indices = np.cumsum(self.metadata.segment_indices)
             file_idx = np.searchsorted(cumulative_indices, idx, side='right')
             audio_idx = idx - cumulative_indices[file_idx - 1] if file_idx > 0 else idx
             row = self.metadata.iloc[file_idx]
@@ -919,13 +919,13 @@ def warmup_train(model, n_epochs, loader, optimizer, device, debug=False):
     
     return losses, W_hat, H_hat, H1    
  
-def train(model, train_loader, valid_loader, optimizer, criterion, device, epochs, wandb=False):
-    if wandb:
+def train(model, train_loader, valid_loader, optimizer, criterion, device, epochs, W0=None, use_wandb=False):
+    if use_wandb:
         run = wandb.init(
             project=f"{model.__class__.__name__}_train",
             config={
                 "learning_rate": optimizer.param_groups[-1]['lr'],
-                "batch_size": train_loader.batch_size,
+                "batch_size": train_loader.batch_sampler.batch_size,
                 "epochs": epochs,
             },
         )
@@ -938,20 +938,48 @@ def train(model, train_loader, valid_loader, optimizer, criterion, device, epoch
         train_loss, valid_loss = 0, 0
         
         model.train()
-        for M, H in train_loader:
+        for i, (M, H) in enumerate(train_loader):
             
+            M = torch.clamp(M, min=1e-4)
             M = M.to(device)
             H = H.to(device)
             
-            W_hat, H_hat, _ = model(M, device=device)
+            # Tracking gpu usage
+            gpu_info = get_gpu_info()
+            log_gpu_info(gpu_info, filename="logs/gpu_info_log.csv")
+            
+            W_hat, H_hat, _, _ = model(M, device=device, i=i)
+        
+            # Tracking gpu usage
+            gpu_info = get_gpu_info()
+            log_gpu_info(gpu_info, filename="logs/gpu_info_log.csv")
             
             # H_hat_r = soft_permutation_match(H_hat, model.H0, rows=True)
             
             optimizer.zero_grad()
-            loss = criterion(H_hat, H)
+            
+            loss = criterion(H_hat, H)/torch.linalg.norm(H) + torch.linalg.norm(W_hat)/ torch.linalg.norm(W0)
+            
+            # if i%100==0:
+            #     vis_H = H_hat[0].clone()
+            #     print(f"mean H_hat: {torch.mean(vis_H)}")
+            #     spec.vis_cqt_spectrogram(vis_H.detach().cpu(), title="H_hat", use_wandb=use_wandb)
+            #     print(loss)
             # loss = criterion(H_hat_r, H[0])
+            
+            # Tracking gpu usage
+            gpu_info = get_gpu_info()
+            log_gpu_info(gpu_info, filename="logs/gpu_info_log.csv")
+            
             loss.backward()
+            
+            if torch.sum(torch.nonzero(torch.cat([torch.isnan(param.grad.view(-1)) if param.grad is not None else torch.nan for param in model.parameters()], 0))) != 0:
+                print(f"Bacward grads nans: {torch.sum(torch.nonzero(torch.cat([torch.isnan(param.grad.view(-1)) if param.grad is not None else torch.nan for param in model.parameters()], 0)))}")
+            
             optimizer.step()
+            
+            if torch.sum(torch.cat([torch.nonzero(torch.isnan(param.data).view(-1)) for param in model.parameters()], 0)) != 0:
+                print(f"Step param nans: {torch.sum(torch.cat([torch.nonzero(torch.isnan(param.data).view(-1)) for param in model.parameters()], 0))}")
             
             train_loss += loss.item()
         
@@ -959,17 +987,26 @@ def train(model, train_loader, valid_loader, optimizer, criterion, device, epoch
         train_losses.append(train_loss)
         print(f"epoch {epoch}, loss = {train_loss:5f}")
         
-        if wandb:
+        if use_wandb:
             wandb.log({"training loss": train_loss})
     
         model.eval()
         for M, H in valid_loader:
             
+            M = torch.clamp(M, min=1e-4)
             M = M.to(device)
             H = H.to(device)
             
+            # Tracking gpu usage
+            gpu_info = get_gpu_info()
+            log_gpu_info(gpu_info, filename="logs/gpu_info_log.csv")
+            
             with torch.no_grad():
-                W_hat, H_hat, _ = model(M)
+                W_hat, H_hat, _, _ = model(M)
+            
+            # Tracking gpu usage
+            gpu_info = get_gpu_info()
+            log_gpu_info(gpu_info, filename="logs/gpu_info_log.csv")
             
             # H_hat_r = soft_permutation_match(H_hat, model.H0, rows=True)
             # loss = criterion(H_hat_r, H[0])
@@ -979,14 +1016,14 @@ def train(model, train_loader, valid_loader, optimizer, criterion, device, epoch
         valid_loss /= len(valid_loader)
         valid_losses.append(valid_loss)
 
-        if wandb:
+        if use_wandb:
             wandb.log({"valid loss": valid_loss})
             
         if valid_loss <= valid_loss_min:
           print('validation loss decreased ({:.6f} --> {:.6f}).  Saving model ...'.format(
           valid_loss_min,
           valid_loss))
-          torch.save(model.state_dict(), f'/home/ids/edabier/AMT/Unrolled-NMF/models/{model.__class__.__name__}.pt')
+          torch.save(model.state_dict(), f'models/{model.__class__.__name__}.pt')
           valid_loss_min = valid_loss
     
     return train_losses, valid_losses, W_hat, H_hat
@@ -1028,13 +1065,11 @@ def transribe(model, M, device):
     model.eval()
     model.to(device=device)
 
-    # Initialize H for each input tensor
-    model.init_H(M)
-
     with torch.no_grad():
-        W_hat, H_hat, M_hat = model(M)
+        W_hat, H_hat, M_hat, norm = model(M)
         freqs = librosa.cqt_frequencies(n_bins=288, fmin=librosa.note_to_hz('A0'), bins_per_octave=36)
         _, notes = init.W_to_pitch(W_hat, freqs, use_max=True)
+        H_hat = H_hat * norm
         midi_hat, active_midi = init.WH_to_MIDI(W_hat, H_hat, notes, threshold=0.05)
 
     return W_hat, H_hat, M_hat, midi_hat, active_midi

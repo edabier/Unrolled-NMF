@@ -7,8 +7,11 @@ import torch.nn.functional as F
 import librosa
 import nnAudio.features.cqt as nn_cqt
 import time
+from io import BytesIO
+from PIL import Image
 import warnings
 from scipy.interpolate import interp1d
+import wandb
 
 # Problem in the pretty_midi library, some files are not loaded correctly, this patches the problem
 pretty_midi.pretty_midi.MAX_TICK = 1e10
@@ -68,7 +71,7 @@ def vis_spectrogram(spec, times, frequencies, start, stop, min_freq, max_freq):
 """
 CQT Spectrogram
 """
-def cqt_spec(signal, sample_rate, hop_length=128, fmin=librosa.note_to_hz('A0'), bins_per_octave=36, n_bins=288, normalize_thresh=None, dtype=None):
+def cqt_spec(signal, sample_rate, hop_length=128, fmin=librosa.note_to_hz('A0'), bins_per_octave=36, n_bins=288, normalize_thresh=None, eps=1e-6, dtype=None):
     """
     Computes the CQT spectrogram
     """
@@ -90,12 +93,9 @@ def cqt_spec(signal, sample_rate, hop_length=128, fmin=librosa.note_to_hz('A0'),
             cqt = cqt.squeeze(0)
             
         if normalize_thresh is not None:
-            cqt = l1_norm(cqt, threshold=normalize_thresh, set_to_zero=True)
+            cqt, _ = l1_norm(cqt, threshold=normalize_thresh, set_min=1e-6)
+            cqt = torch.clamp(cqt, min=eps)
             # cqt = cqt / torch.sum(torch.abs(cqt), dim=0, keepdim=True)
-            
-        # Convert magnitude to decibels
-        # cqt = librosa.cqt(y=signal.cpu().numpy(), sr=sample_rate, hop_length=hop_length, fmin=fmin, n_bins=n_bins, bins_per_octave=bins_per_octave)
-        # cqt = torch.from_numpy(cqt)
         
     else:
         signal  = signal.squeeze().numpy()
@@ -122,22 +122,34 @@ def cqt_spec(signal, sample_rate, hop_length=128, fmin=librosa.note_to_hz('A0'),
         return cqt, times, frequencies
     else:
         return torch.from_numpy(cqt), times, frequencies
+    
+def max_columns(W):
+    max_values, _ = torch.max(W, dim=0)
+    W_max = torch.zeros_like(W)
+    _, max_indices = torch.max(W, dim=0)
+    for col in range(W.shape[1]):
+        W_max[max_indices[col], col] = max_values[col]
 
-def l1_norm(tensor, threshold, set_to_zero=True):
-    l1_norm = torch.sum(torch.abs(tensor), dim=0, keepdim=True)
+    return W_max
+
+def l1_norm(tensor, threshold, set_min=None):
+    if len(tensor.shape) ==2: 
+        l1_norm = torch.sum(torch.abs(tensor), dim=0, keepdim=True)
+    else:
+        l1_norm = torch.sum(torch.abs(tensor), dim=1, keepdim=True)
     mean_norm = torch.mean(l1_norm)
     
     mask = l1_norm >= threshold * mean_norm
     normalized_tensor = tensor / l1_norm
 
-    if set_to_zero:
-        tensor = normalized_tensor * mask
+    if set_min is not None:
+        tensor = torch.where(mask, normalized_tensor, set_min)
     else:
         tensor = torch.where(mask, normalized_tensor, tensor)
 
-    return tensor
+    return tensor, l1_norm
 
-def vis_cqt_spectrogram(spec, times=None, frequencies=None, start=None, stop=None, set_note_label=False, add_C8=False, cmap="magma", title=None, x_axis=None):
+def vis_cqt_spectrogram(spec, times=None, frequencies=None, start=None, stop=None, set_note_label=False, add_C8=False, cmap="magma", title=None, x_axis=None, use_wandb=False):
     
     if times is None:
         times = np.arange(spec.shape[1])
@@ -147,8 +159,8 @@ def vis_cqt_spectrogram(spec, times=None, frequencies=None, start=None, stop=Non
     
     if start is None:
         start = 0
-        end = spec.shape[1]    
-    
+        stop = spec.shape[1]
+        
     start_idx       = np.searchsorted(times, start)
     stop_idx        = np.searchsorted(times, stop)
 
@@ -202,6 +214,19 @@ def vis_cqt_spectrogram(spec, times=None, frequencies=None, start=None, stop=Non
                    labels=labels[::step])
     plt.colorbar()
     plt.tight_layout()
+    
+    if use_wandb:
+        buf = BytesIO()
+        plt.savefig(buf, format='png')
+        plt.close()
+        buf.seek(0)
+        
+        img = Image.open(buf)
+        img_array = np.array(img)
+
+        # Log the image to wandb
+        wandb.log({"CQT Spectrogram": wandb.Image(img_array)})
+    
     plt.show()
     return
 
