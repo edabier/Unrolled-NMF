@@ -3,7 +3,6 @@ import torchaudio
 import os
 import librosa
 import numpy as np
-import soundfile as sf
 
 import src.spectrograms as spec
 import src.utils as utils
@@ -17,11 +16,16 @@ def first_non_zero(f0):
     non_zero    = torch.argmax(f0_2, 0, keepdim=True)
     return non_zero
 
-def init_W(folder_path=None, hop_length=128, bins_per_octave=36, n_bins=288, downsample=False, verbose=False, normalize_thresh=None, eps=1e-6, dtype=None):
+def init_W(folder_path=None, hop_length=128, bins_per_octave=36, n_bins=288, downsample=False, verbose=False, normalize_thresh=None, dtype=None):
     """
     Create a W matrix from all audio files contained in the input path
     By taking the column of highest energy of the CQT
     """
+    if dtype is not None:
+        eps = torch.finfo(type=dtype).min
+    else:
+        eps = torch.finfo().min
+    
     if folder_path is not None:
         templates = []
         true_freqs     = []
@@ -48,7 +52,7 @@ def init_W(folder_path=None, hop_length=128, bins_per_octave=36, n_bins=288, dow
             assert duration >= min_duration, f"Audio file {fname} is too short. Duration: {duration:.2f}s, Required: {min_duration:.2f}s"
             
             spec_cqt, _, freq = spec.cqt_spec(y, sample_rate=sr, hop_length=hop_length,
-                                    bins_per_octave=bins_per_octave, n_bins=n_bins, normalize_thresh=normalize_thresh, eps=eps, dtype=dtype)
+                                    bins_per_octave=bins_per_octave, n_bins=n_bins, normalize_thresh=normalize_thresh, dtype=dtype)
             
             if len(fname) == 7:
                 note, octave = fname[0:2], int(fname[2])
@@ -73,9 +77,6 @@ def init_W(folder_path=None, hop_length=128, bins_per_octave=36, n_bins=288, dow
         # W of shape f * (88*n)
         W = torch.stack(templates, axis=1)
         
-        # if normalize:
-        #     W = W/ torch.sum(torch.abs(W), dim=0, keepdim=True)
-        
         if verbose:
             print("Initialized W for the model from files")
 
@@ -93,12 +94,17 @@ def init_W(folder_path=None, hop_length=128, bins_per_octave=36, n_bins=288, dow
     return W, freqs, sr, true_freqs
 
 def init_H(l, t, W, M, n_init_steps, beta=1, device=None, batch_size=None, dtype=None):
-    eps = 1e-6
+    if dtype is not None:
+        eps = torch.finfo(type=dtype).min
+    else:
+        eps = torch.finfo().min
     
     if batch_size is not None:
-        H = torch.rand(batch_size, l, t, dtype=dtype) + eps
+        H = torch.rand(batch_size, l, t, dtype=dtype)
+        H = torch.clamp(H, min=eps)
     else:
-        H = torch.rand(l, t, dtype=dtype) + eps
+        H = torch.rand(l, t, dtype=dtype)
+        H = torch.clamp(H, min=eps)
         
     if device is not None:
         H = H.to(device)
@@ -117,7 +123,7 @@ def init_H(l, t, W, M, n_init_steps, beta=1, device=None, batch_size=None, dtype
             Wt = W.T
 
         numerator = Wt @ (Wh_beta_minus_2 * M)
-        denominator = Wt @ Wh_beta_minus_1 + eps
+        denominator = Wt @ Wh_beta_minus_1
         denominator = torch.clamp(denominator, min=eps)
 
         H = H * (numerator / denominator)

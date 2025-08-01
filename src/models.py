@@ -1,11 +1,6 @@
 import torch.nn as nn
-import torchaudio
-import numpy as np
 import torch
 import matplotlib.pyplot as plt
-import os
-import librosa
-import time
 
 import src.utils as utils
 import src.spectrograms as spec
@@ -22,8 +17,8 @@ class Aw_cnn(nn.Module):
         self.conv1 = nn.Conv1d(in_channels, hidden_channels*2, kernel_size=5, padding=5 // 2, dtype=dtype)
         self.conv2 = nn.Conv1d(hidden_channels*2, hidden_channels, kernel_size=3, padding=3 // 2, dtype=dtype)
         self.conv3 = nn.Conv1d(hidden_channels, 1, kernel_size=3, padding=1, dtype=dtype)
-        self.bn1 = nn.BatchNorm1d(hidden_channels*2, dtype=dtype)
-        self.bn2 = nn.BatchNorm1d(hidden_channels, dtype=dtype)
+        # self.bn1 = nn.BatchNorm1d(hidden_channels*2, dtype=dtype)
+        # self.bn2 = nn.BatchNorm1d(hidden_channels, dtype=dtype)
         self.relu  = nn.LeakyReLU()
         # We use a softplus activation to force > 0 output
         # and to avoid too big updates that could lead to exploding gradients
@@ -34,8 +29,8 @@ class Aw_cnn(nn.Module):
         # print(f"Aw in: {x.shape}")
         batch_size, f = x.shape
         x = x.reshape(batch_size, 1, f)             # (batch, 1, f)
-        y = self.relu(self.bn1(self.conv1(x)))      # (batch, 64, f)
-        y = self.relu(self.bn2(self.conv2(y)))      # (batch, 32, f)
+        y = self.relu(self.conv1(x))      # (batch, 64, f)
+        y = self.relu(self.conv2(y))      # (batch, 32, f)
         y = self.softplus(self.conv3(y))            # (batch, 1, f)
         out = y.reshape(batch_size, f, 1)
         # print(f"Aw out: {out.shape}")
@@ -53,8 +48,8 @@ class Aw_2d_cnn(nn.Module):
         self.conv1 = nn.Conv2d(in_channels, hidden_channels*2, kernel_size=(24*5,5), padding="same", dtype=dtype)
         self.conv2 = nn.Conv2d(hidden_channels*2, hidden_channels, kernel_size=(24*3,3), padding="same", dtype=dtype)
         self.conv3 = nn.Conv2d(hidden_channels, 1, kernel_size=(24*3,3), padding="same", dtype=dtype)
-        self.bn1 = nn.BatchNorm2d(hidden_channels*2, dtype=dtype)
-        self.bn2 = nn.BatchNorm2d(hidden_channels, dtype=dtype)
+        # self.bn1 = nn.BatchNorm2d(hidden_channels*2, dtype=dtype)
+        # self.bn2 = nn.BatchNorm2d(hidden_channels, dtype=dtype)
         self.relu  = nn.LeakyReLU()
         self.softplus = nn.Softplus()
     
@@ -65,8 +60,8 @@ class Aw_2d_cnn(nn.Module):
             f, l = x.shape
             batch_size = 1
         x = x.reshape(batch_size, 1, f, l)
-        y = self.relu(self.bn1(self.conv1(x)))      # (batch, 64, f*l)
-        y = self.relu(self.bn2(self.conv2(y)))      # (batch, 32, f*l)
+        y = self.relu(self.conv1(x))      # (batch, 64, f*l)
+        y = self.relu(self.conv2(y))      # (batch, 32, f*l)
         y = self.softplus(self.conv3(y))            # (batch, 1, f*l)
         out = y.reshape(batch_size, f, l)
         return out
@@ -83,8 +78,8 @@ class Ah_cnn(nn.Module):
         self.conv1 = nn.Conv1d(in_channels, hidden_channels*2, kernel_size=5, padding=5 // 2, dtype=dtype)
         self.conv2 = nn.Conv1d(hidden_channels*2, hidden_channels, kernel_size=3, padding=3 // 2, dtype=dtype)
         self.conv3 = nn.Conv1d(hidden_channels, 1, kernel_size=3, padding=1, dtype=dtype)
-        self.bn1 = nn.BatchNorm1d(hidden_channels*2, dtype=dtype)
-        self.bn2 = nn.BatchNorm1d(hidden_channels, dtype=dtype)
+        # self.bn1 = nn.BatchNorm1d(hidden_channels*2, dtype=dtype)
+        # self.bn2 = nn.BatchNorm1d(hidden_channels, dtype=dtype)
         self.relu  = nn.LeakyReLU()
         # We use a softplus activation to force > 0 output
         # and to avoid too big updates that could lead to exploding gradients
@@ -99,8 +94,8 @@ class Ah_cnn(nn.Module):
             _, t = x.shape
             batch_size = 1
         x = x.reshape(batch_size, 1, t)
-        y = self.relu(self.bn1(self.conv1(x)))  # (batch, 64, t)
-        y = self.relu(self.bn2(self.conv2(y)))  # (batch, 32, t)
+        y = self.relu(self.conv1(x))  # (batch, 64, t)
+        y = self.relu(self.conv2(y))  # (batch, 32, t)
         y = self.relu(self.conv3(y))            # (batch, 1, t)
         out = self.softplus(y)                  # (batch, 1, t)
         out = out.view(batch_size, 1, t)        # (batch, 1, t)
@@ -122,12 +117,17 @@ class RALMU_block(nn.Module):
         use_ah (bool, optional): whether to use Ah in the acceleration of MU (default: ``True``)
         learnable_beta (bool, optional): whether to learn the value of beta (default: ``False``)
     """
-    def __init__(self, beta=1, learnable_beta=False, eps=1e-6, shared_aw=None, shared_ah=None, use_ah=True, aw_2d=False, clip_H=False, lambda_w=None, lambda_h=None, dtype=None):
+    def __init__(self, beta=1, learnable_beta=False, shared_aw=None, shared_ah=None, use_ah=True, aw_2d=False, clip_H=False, lambda_w=None, lambda_h=None, dtype=None):
         super().__init__()
         
         self.use_ah     = use_ah
         self.aw_2d      = aw_2d
-        self.eps        = eps
+        
+        if dtype is not None:
+            self.eps = torch.finfo(type=dtype).min
+        else:
+            self.eps = torch.finfo().min
+            
         self.clip_H     = clip_H 
         self.lambda_w   = lambda_w
         self.lambda_h   = lambda_h
@@ -141,7 +141,7 @@ class RALMU_block(nn.Module):
         else:
             self.register_buffer("beta", torch.tensor(beta))
 
-    def forward(self, M, W, H, i=None):
+    def forward(self, M, W, H):
         
         is_batched = (len(M.shape) == 3)
         
@@ -173,10 +173,10 @@ class RALMU_block(nn.Module):
         
         if len(torch.nonzero(torch.isnan(W[0].view(-1)))) > 0:
             print("Nan in input W")
-            spec.vis_cqt_spectrogram(W[0].detach().cpu(), title=f"W with NaNs at step {i}")
+            spec.vis_cqt_spectrogram(W[0].detach().cpu(), title=f"W with NaNs")
         if len(torch.nonzero(torch.isnan(H[0].view(-1)))) > 0:
             print("Nan in input H")
-            spec.vis_cqt_spectrogram(H[0].detach().cpu(), title=f"H with NaNs at step {i}")
+            spec.vis_cqt_spectrogram(H[0].detach().cpu(), title=f"H with NaNs")
         
         # Use octave splitting to inject only intra-octave notes in Aw
         if self.aw_2d:
@@ -252,8 +252,12 @@ class RALMU(nn.Module):
     def __init__(self, l=88, beta=1, learnable_beta=False, W_path=None, n_iter=10, n_init_steps=100, hidden=32, use_ah=True, shared=False, aw_2d=False, clip_H=False, norm_thresh=0.01, lambda_w=None, lambda_h=None, downsample=False, return_layers=True, dtype=None, verbose=False):
         super().__init__()
         
+        if dtype is not None:
+            self.eps = torch.finfo(type=dtype).min
+        else:
+            self.eps = 1e-6
+            
         self.l              = l
-        self.eps            = 1e-4 # min value for MU
         self.beta           = beta
         self.W_path         = W_path
         self.n_iter         = n_iter
@@ -273,12 +277,12 @@ class RALMU(nn.Module):
 
         # Unrolling layers
         self.layers = nn.ModuleList([
-            RALMU_block(eps=self.eps, shared_aw=shared_aw, shared_ah=shared_ah, use_ah=use_ah, learnable_beta=learnable_beta, aw_2d=aw_2d, clip_H=clip_H, lambda_w=lambda_w, lambda_h=lambda_h, dtype=dtype)
+            RALMU_block(shared_aw=shared_aw, shared_ah=shared_ah, use_ah=use_ah, learnable_beta=learnable_beta, aw_2d=aw_2d, clip_H=clip_H, lambda_w=lambda_w, lambda_h=lambda_h, dtype=dtype)
             for _ in range(self.n_iter)
         ])
     
     # @profile
-    def forward(self, M, device=None, i=None):
+    def forward(self, M, device=None):
         
         batch_size=None
         if len(M.shape) == 3: # Batched input (training phase)
@@ -287,16 +291,16 @@ class RALMU(nn.Module):
             _, t = M.shape
         
         normalize = self.norm_thresh is not None
-        W, _, _, _ = init.init_W(self.W_path, downsample=self.downsample, normalize_thresh=self.norm_thresh, eps=self.eps, verbose=self.verbose, dtype=self.dtype)
+        W, _, _, _ = init.init_W(self.W_path, downsample=self.downsample, normalize_thresh=self.norm_thresh, verbose=self.verbose, dtype=self.dtype)
         if batch_size is not None:
             W = W.unsqueeze(0).expand(batch_size, -1, -1)
             
         # Tracking gpu usage
         gpu_info = utils.get_gpu_info()
-        utils.log_gpu_info(gpu_info, filename="logs/gpu_info_log.csv")
+        utils.log_gpu_info(gpu_info, filename="/home/ids/edabier/AMT/Unrolled-NMF/logs/gpu_info_log.csv")
         
         H = init.init_H(self.l, t, W, M, n_init_steps=self.n_init_steps, beta=self.beta, device=device, batch_size=batch_size, dtype=self.dtype)
-        
+
         self.norm = None
         if normalize:
             H, self.norm = spec.l1_norm(H, threshold=self.norm_thresh, set_min=self.eps)
@@ -305,17 +309,17 @@ class RALMU(nn.Module):
             
         # Tracking gpu usage
         gpu_info = utils.get_gpu_info()
-        utils.log_gpu_info(gpu_info, filename="logs/gpu_info_log.csv")
+        utils.log_gpu_info(gpu_info, filename="/home/ids/edabier/AMT/Unrolled-NMF/logs/gpu_info_log.csv")
         
         if self.return_layers:
             W_layers = []
             H_layers = []
 
             for i, layer in enumerate(self.layers):
-                W, H = layer(M, W, H, i=i)
+                W, H = layer(M, W, H)
                 # Tracking gpu usage
                 gpu_info = utils.get_gpu_info()
-                utils.log_gpu_info(gpu_info, filename="logs/gpu_info_log.csv")
+                utils.log_gpu_info(gpu_info, filename="/home/ids/edabier/AMT/Unrolled-NMF/logs/gpu_info_log.csv")
                 
                 W_layers.append(W)
                 H_layers.append(H)
@@ -329,10 +333,10 @@ class RALMU(nn.Module):
             return W_layers, H_layers, M_hats, self.norm
         else:
             for layer in self.layers:
-                W, H = layer(M, W, H, i=i)
+                W, H = layer(M, W, H)
                 
                 # Tracking gpu usage
                 gpu_info = utils.get_gpu_info()
-                utils.log_gpu_info(gpu_info, filename="logs/gpu_info_log.csv")
+                utils.log_gpu_info(gpu_info, filename="/home/ids/edabier/AMT/Unrolled-NMF/logs/gpu_info_log.csv")
             M_hat = W @ H
             return W, H, M_hat, self.norm

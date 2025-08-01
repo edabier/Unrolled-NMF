@@ -1,20 +1,15 @@
-import torch.nn as nn
-import torch.nn.functional as F
 import torch
-import torchaudio
 from torch.utils.data import Dataset, Sampler
 import librosa
 import numpy as np
 import wandb
 import matplotlib.pyplot as plt
-import glob, os, warnings, math
+import os, warnings, math
 import mir_eval
 from tqdm import tqdm
 import subprocess, csv
 from datetime import datetime
-from time import time
 from scipy.optimize import linear_sum_assignment
-import memory_profiler
 import fcntl
 
 import src.spectrograms as spec
@@ -23,7 +18,6 @@ import src.init as init
 """
 Model and gpu infos 
 """
-
 def model_infos(model, names=False):
     """
     Displays the number of parameters of the model
@@ -34,6 +28,38 @@ def model_infos(model, names=False):
         for name, param in model.named_parameters():
             print(f"Layer: {name} | Size: {param.size()}")
     print(f"The model has {total_params} parameters")
+    
+def save_model(model, epoch, optimizer, directory, is_permanent=False):
+    """
+    Overwrite the previous model save if not is_permanent, otherwise, saves a new version of the model
+    """
+    if is_permanent:
+        # Save a permanent copy of the model
+        torch.save({
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            # Add any other information you want to save
+        }, os.path.join(directory, f'model_epoch_{epoch}.pt'))
+    else:
+        # Overwrite the temporary model save
+        torch.save({
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+        }, os.path.join(directory, 'checkpoint.pt'))
+        
+def load_checkpoint(path, model, optimizer):
+    if os.path.isfile(path):
+        checkpoint = torch.load(path)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        start_epoch = checkpoint['epoch'] + 1  # Start from the next epoch
+        print(f"Resuming training from epoch {start_epoch}")
+    else:
+        start_epoch = 0
+        print("No checkpoint found. Starting training from scratch.")
+    return start_epoch
 
 def get_gpu_info():
     try:
@@ -54,7 +80,7 @@ def get_gpu_info():
         print(f"Error running nvidia-smi: {e}")
         return None
 
-def log_gpu_info(gpu_info, filename='logs/gpu_info_log.csv'):
+def log_gpu_info(gpu_info, filename='AMT/Unrolled-NMF/logs/gpu_info_log.csv'):
     with open(filename, mode='a', newline='') as file:
         writer = csv.writer(file)
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -65,98 +91,7 @@ def log_gpu_info(gpu_info, filename='logs/gpu_info_log.csv'):
 
 """
 Dataset class and utils functions
-"""
-
-class NMFDataset(Dataset):
-    """
-    creates a Dataset object from a folder of midi and audio files
-    Args:
-        audio_dir (str): the directory for audio (.wav) files
-        midi_dir (str): the directory for midi (.mid) files
-        hop_length (int, optional): define the hop length for the CQT spectrogram (default: ``128``)
-        use_h (bool, optional): whether to use pianoroll midi or H matrix as dataset's item (default: ``False``)
-        fixed_length (bool, optional): whether to have a constant duration for audio/ midi items (default: ``True``)
-        num_files (int, optional): The number of files to include in the dataset. If None, all files are used (default: ``None``)
-    """
-    
-    def __init__(self, audio_dir, midi_dir, hop_length=128, use_H=False, fixed_length=True, num_files=None):
-        assert os.path.isdir(audio_dir) or os.path.isdir(midi_dir), f"The directory '{audio_dir} or {midi_dir}' does not exist"
-        self.audio_files = sorted(glob.glob(os.path.join(audio_dir, '*.wav')))
-        self.midi_dir = midi_dir
-        self.hop_length = hop_length
-        self.use_H = use_H
-        self.fixed_length = fixed_length
-        
-        self.num_files = num_files
-        if num_files is not None and num_files < len(self.audio_files):
-            self.audio_files = self.audio_files[:num_files]
-            
-        self.min_length = self._determine_min_length() if fixed_length else None
-        self.segment_indices = self._precompute_segment_indices() if fixed_length else None
-
-    def __len__(self):
-        if self.fixed_length:
-            return sum(self.segment_indices)
-        else:
-            return len(self.audio_files)
-
-    def _determine_min_length(self):
-        min_length = float('inf')
-        for audio_path in self.audio_files:
-            waveform, sr = torchaudio.load(audio_path)
-            _, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length)
-            length = times_cqt.shape[0]
-            if length < min_length:
-                min_length = length
-        return min_length
-
-    def _precompute_segment_indices(self):
-        segment_indices = []
-        for audio_path in self.audio_files:
-            waveform, sr = torchaudio.load(audio_path)
-            _, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length)
-            length = times_cqt.shape[0]
-            segment_indices.append(length // self.min_length)
-        return segment_indices
-
-    def __getitem__(self, idx):
-        if self.fixed_length:
-            # Find which audio file the idx corresponds to
-            audio_idx = 0
-            while idx >= self.segment_indices[audio_idx]:
-                idx -= self.segment_indices[audio_idx]
-                audio_idx += 1
-
-            audio_path = self.audio_files[audio_idx]
-            waveform, sr = torchaudio.load(audio_path)
-            M, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length)
-            midi_path = os.path.join(self.midi_dir, os.path.basename(audio_path).replace(".wav", ".mid"))
-            midi, onset, offset, _ = spec.midi_to_pianoroll(midi_path, waveform, times_cqt, self.hop_length)
-
-            if self.use_H:
-                active_midi = [i for i in range(88) if (midi[i, :] > 0).any().item()]
-                midi = init.MIDI_to_H(midi, active_midi, onset, offset)
-
-            start_idx = idx * self.min_length
-            end_idx = start_idx + self.min_length
-
-            M_segment = M[:, start_idx:end_idx]
-            midi_segment = midi[:, start_idx:end_idx]
-
-            return M_segment, midi_segment
-        else:
-            audio_path = self.audio_files[idx]
-            waveform, sr = torchaudio.load(audio_path)
-            M, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length)
-            midi_path = os.path.join(self.midi_dir, os.path.basename(audio_path).replace(".wav", ".mid"))
-            midi, onset, offset, _ = spec.midi_to_pianoroll(midi_path, waveform, times_cqt, self.hop_length, sr)
-
-            if self.use_H:
-                active_midi = [i for i in range(88) if (midi[i, :] > 0).any().item()]
-                midi = init.MIDI_to_H(midi, active_midi, onset, offset)
-
-            return M, midi
-        
+"""     
 class SequentialBatchSampler(Sampler):
     def __init__(self, data_source, batch_size):
         self.data_source = data_source
@@ -221,7 +156,6 @@ class LocalMapsDataset(Dataset):
         self.hop_length     = hop_length
         self.fixed_length   = fixed_length
         self.dtype          = dtype
-        # self._cached_data = {}
         
         if subset is not None:
             num_files = int(len(self.metadata) * subset)
@@ -255,9 +189,6 @@ class LocalMapsDataset(Dataset):
         if idx >= len(self):
             raise IndexError("Index out of range")
         
-        # if idx in self._cached_data:
-        #     return self._cached_data[idx]
-        
         if self.fixed_length is not None:
             cumulative_indices = np.cumsum(self.metadata.segment_indices)
             file_idx = np.searchsorted(cumulative_indices, idx, side='right')
@@ -269,10 +200,6 @@ class LocalMapsDataset(Dataset):
             H = self.safe_load(row.midi_path).to(self.dtype)
             onset = self.safe_load(row.onset_path).to(self.dtype)
             offset = self.safe_load(row.offset_path).to(self.dtype)
-            # M = torch.load(row.file_path, map_location=self.dev).to(self.dtype)
-            # H = torch.load(row.midi_path, map_location=self.dev).to(self.dtype)
-            # onset = torch.load(row.onset_path, map_location=self.dev).to(self.dtype)
-            # offset = torch.load(row.offset_path, map_location=self.dev).to(self.dtype)
             
             start_idx = audio_idx * self.fixed_length
             end_idx = start_idx + self.fixed_length
@@ -288,168 +215,14 @@ class LocalMapsDataset(Dataset):
             if M_segment.shape[1] < self.fixed_length:
                 M_segment = pad_by_repeating(M_segment, self.fixed_length)
                 H_segment = pad_by_repeating(H_segment, self.fixed_length)
-                
-            # self._cached_data[idx] = (M_segment, H_segment)
 
             return M_segment, H_segment
         
         else:
             row = self.metadata.iloc[idx]
-            # M = torch.load(row.file_path, map_location=self.dev).to(self.dtype)
-            # H = torch.load(row.midi_path, map_location=self.dev).to(self.dtype)
             M = self.safe_load(row.file_path).to(self.dtype)
             H = self.safe_load(row.midi_path).to(self.dtype)
-            # self._cached_data = (M,H)
             return M, H
-
-class MapsDataset(Dataset):
-    """
-    Creates a Dataset object from Maps' metadata
-
-    Args:
-        metadata (pd.DataFrame): DataFrame containing 'file_path' and 'midi_path' columns.
-        hop_length (int, optional): Define the hop length for the CQT spectrogram (default: 128).
-        use_H (bool, optional): Whether to use pianoroll MIDI or H matrix as dataset's item (default: False).
-        fixed_length (bool, optional): Whether to have a constant duration for audio/MIDI items (default: True).
-        subset (float, optional): The subset of files to include in the dataset. If None, all files are used (default: None).
-        filter (int, optional): Min duration of files under which to filter the dataset (default: `None`)
-    """
-    def __init__(self, metadata, hop_length=128, use_H=False, fixed_length=None, subset=None, sort=True, filter_length=None, downsample=False, norm_thresh=0.1, verbose=False, dtype=None):
-        assert 'file_path' in metadata.columns and 'midi_path' in metadata.columns, "Metadata should contain 'file_path' and 'midi_path' columns."
-
-        self.metadata = metadata.copy()
-        self.hop_length = hop_length
-        self.use_H = use_H
-        self.fixed_length = fixed_length
-        self.sort = sort
-        self.filter = filter_length
-        self.downsample = downsample
-        self.nom_thresh = norm_thresh
-        self.dtype = dtype
-
-        if subset is not None:
-            num_files = int(len(metadata) * subset)
-            self.metadata = self.metadata.iloc[:num_files]
-        
-        if self.sort:
-            if verbose:
-                print("Computing the length of files...")
-            durations, segment_indices, time_steps = self._compute_lengths()
-            self.metadata.loc[:, 'duration'] = durations
-            self.metadata.loc[:, 'time_steps'] = time_steps
-            self.metadata.loc[:, 'segment_indices'] = segment_indices
-            self.metadata = self.metadata.sort_values(by='duration')
-            
-            if self.filter is not None:
-                filter_condition = self.metadata['duration'] > self.filter
-                # indices = self.metadata.index.to_list()
-                
-                self.metadata = self.metadata[filter_condition].reset_index(drop=True)
-                # self.segment_indices = [self.segment_indices[i] for i, idx in enumerate(indices) if filter_condition[idx]]
-        
-            self.min_length = fixed_length
-    
-    def _compute_lengths(self):
-        durations = []
-        segment_indices = []
-        time_steps = []
-        sr = self.metadata.iloc[0]["sampling_rate"]
-        
-        if self.fixed_length is not None:
-            self.fixed_length = math.ceil((self.fixed_length * sr) / self.hop_length)
-        
-        for _, row in tqdm(self.metadata.iterrows()):
-            waveform, _ = torchaudio.load(row.file_path)
-            
-            if self.downsample:
-                downsample_rate = sr//2
-                downsampler = torchaudio.transforms.Resample(sr, downsample_rate, dtype=waveform.dtype)
-                waveform = downsampler(waveform)
-            
-            _, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length)
-            
-            durations.append(waveform.shape[1]/sr)
-            if self.fixed_length is not None:
-                segment_indices.append(-(times_cqt.shape[0] // -self.fixed_length))
-            time_steps.append(times_cqt.shape[0])
-            
-        return np.array(durations), segment_indices, time_steps
-
-    def __len__(self):
-        if self.fixed_length:
-            return sum(self.metadata.segment_indices)
-        else:
-            return len(self.metadata)
-
-    def __getitem__(self, idx):
-        if idx >= len(self):
-            raise IndexError("Index out of range")
-        
-        if self.fixed_length is not None:
-            cumulative_indices = np.cumsum(self.metadata.segment_indices)
-            file_idx = np.searchsorted(cumulative_indices, idx, side='right')
-            audio_idx = idx - cumulative_indices[file_idx - 1] if file_idx > 0 else idx
-            row = self.metadata.iloc[file_idx]
-            try:
-                waveform, sr = torchaudio.load(row['file_path'])
-                
-                if self.downsample:
-                    downsample_rate = sr//2
-                    downsampler = torchaudio.transforms.Resample(sr, downsample_rate, dtype=waveform.dtype)
-                    waveform = downsampler(waveform)
-                    
-                M, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length, normalize_thresh=self.norm_thresh, dtype=self.dtype)
-                midi, onset, offset, _ = spec.midi_to_pianoroll(row['midi_path'], waveform, times_cqt, self.hop_length, dtype=self.dtype)
-
-                if self.use_H:
-                    active_midi = [i for i in range(88) if (midi[i, :] > 0).any().item()]
-                    midi = init.MIDI_to_H(midi, active_midi, onset, offset)
-                    if self.norm_thresh is not None:
-                        midi = midi/ spec.l1_norm(midi, threshold=self.norm_thresh)
-
-                start_idx = audio_idx * self.fixed_length
-                end_idx = start_idx + self.fixed_length
-                
-                # Ensure that the end index does not exceed the length of the data
-                if end_idx > M.shape[1]:
-                    end_idx = M.shape[1]
-
-                M_segment = M[:, start_idx:end_idx]
-                # midi_segment = midi[:, start_idx:end_idx]
-                midi_segment, onset_segment, offset_segment = spec.cut_midi_segment(midi, onset, offset, start_idx, end_idx)
-                
-                # Pad the last segment if necessary
-                if M_segment.shape[1] < self.fixed_length:
-                    M_segment = pad_by_repeating(M_segment, self.fixed_length)
-                    midi_segment = pad_by_repeating(midi_segment, self.fixed_length)
-
-                return M_segment, midi_segment
-            except Exception as e:
-                # print(f"Skipping {row['midi_path']} due to error: {e}")
-                return self.__getitem__((idx + 1) % len(self))
-        else:
-            row = self.metadata.iloc[idx]
-            try:
-                waveform, sr = torchaudio.load(row['file_path'])
-                
-                if self.downsample:
-                    downsample_rate = sr//2
-                    downsampler = torchaudio.transforms.Resample(sr, downsample_rate, dtype=waveform.dtype)
-                    waveform = downsampler(waveform)
-                    
-                M, times_cqt, _ = spec.cqt_spec(waveform, sr, self.hop_length, normalize_thresh=self.norm_thresh, dtype=self.dtype)
-                midi, onset, offset, _ = spec.midi_to_pianoroll(row['midi_path'], waveform, times_cqt, self.hop_length, sr, dtype=self.dtype)
-
-                if self.use_H:
-                    active_midi = [i for i in range(88) if (midi[i, :] > 0).any().item()]
-                    midi = init.MIDI_to_H(midi, active_midi, onset, offset)
-                    if self.norm_thresh is not None:
-                        midi = midi/ spec.l1_norm(midi, threshold=self.norm_thresh)
-
-                return M, midi
-            except Exception as e:
-                print(f"Skipping {row['midi_path']} due to error: {e}")
-                return self.__getitem__((idx + 1) % len(self))
 
 
 """
@@ -520,305 +293,6 @@ def accuracy_from_recall(recall, N_gt, N_est):
         return tp / (tp + fp + fn)
     except ZeroDivisionError:
         return 0
-
-
-"""
-Loss (no  batch_size)
-"""
-def gaussian_kernel(kernel_size=3, sigma=2, is_2d=False):
-    """
-    Creates a 1D or 2D Gaussian kernel.
-    """
-    if is_2d:
-        ax = torch.linspace(-(kernel_size // 2), kernel_size // 2, kernel_size)
-        xx, yy = torch.meshgrid(ax, ax)
-        kernel = torch.exp(-(xx**2 + yy**2) / (2 * sigma**2))
-        kernel = kernel / kernel.sum()
-        kernel = kernel.unsqueeze(0).unsqueeze(0)
-    else:    
-        kernel = np.exp(-np.linspace(-kernel_size / 2, kernel_size / 2, kernel_size)**2 / (2 * sigma**2))
-        kernel = kernel / kernel.sum()
-        kernel = torch.tensor(kernel, dtype=torch.float32).unsqueeze(0).unsqueeze(0).unsqueeze(-1)
-    return kernel
-
-def filter1d_tensor(tensor, kernel, axis=0, is_2d=False):
-    """
-    Applies a 1D or 2D Gaussian filter to a 2D tensor along a specified axis.
-    """
-    if is_2d:
-        tensor = tensor.unsqueeze(0).unsqueeze(0)
-        filtered_tensor = F.conv2d(tensor, kernel, padding=kernel.size(-1) // 2).squeeze(0).squeeze(0)
-    else:
-        if axis == 0:
-            # Apply the kernel to each column
-            tensor = tensor.T.unsqueeze(0).unsqueeze(0)
-            filtered_tensor = F.conv2d(tensor, kernel, padding=(kernel.size(-2) // 2, 0)).squeeze(0).squeeze(0).T
-        elif axis == 1:
-            # Apply the kernel to each row
-            tensor = tensor.unsqueeze(0).unsqueeze(0)
-            filtered_tensor = F.conv2d(tensor, kernel, padding=(kernel.size(-2) // 2, 0)).squeeze(0).squeeze(0)
-        else:
-            raise ValueError("Axis must be 0 or 1")
-
-    return filtered_tensor
-
-def detect_onset_offset(midi, filter=False):
-    """
-    Detects onsets and offsets
-    Returns one tensor of shape midi with 1s at onsets and offsets, 0 elsewhere
-    If filter=True, applies a gaussian filters to the matrix along the temporal axis
-    """
-    onset = torch.zeros_like(midi)
-    offset = torch.zeros_like(midi)
-    
-    onset[:, 0] = (midi[:, 0] > 0).float()
-    offset[:, -1] = (midi[:, -1] > 0).float()
-    # For every time step
-    for time in range(1, midi.shape[1]-1):
-        # Onset: note active at time t and not t-1
-        onset[:, time] = ((midi[:, time] > 0) & (midi[:, time-1] == 0)).float()
-        
-        # Offset: note not active at time t and active at t-1
-        offset[:, time] = ((midi[:, time] == 0) & (midi[:, time-1] > 0)).float()
-    
-    if filter:
-        kernel = gaussian_kernel(15, 5)
-        filtered_onset = filter1d_tensor(onset, kernel, axis=0)
-        filtered_offset = filter1d_tensor(offset, kernel, axis=0)
-        return filtered_onset, filtered_offset
-    else:
-        return onset, offset
-
-def precision_recall_f1(pred, target, epsilon=1e-7):
-    """
-    Computes precision, recall, and F1 score.
-    """
-    tp = (pred * target).sum()
-    fp = (pred * (1 - target)).sum()
-    fn = ((1 - pred) * target).sum()
-
-    precision = tp / (tp + fp + epsilon)
-    recall = tp / (tp + fn + epsilon)
-    f1 = 2 * (precision * recall) / (precision + recall + epsilon)
-
-    return precision, recall, f1
-
-def pitch_mask(input_column, active_notes, octave_weight, note_weight):
-    """
-    Adds weights to the current midi column's notes
-    Notes that are different from the current note get an increasingly high weight
-    Notes that are octaves apart from the note get a lower weight
-    """
-    mask = torch.zeros_like(input_column)
-    for active_note in active_notes:
-        for i in range(mask.size(0)):
-            mask[i] = note_weight * abs(i - active_note) % 12 + octave_weight * abs(i - active_note) // 12
-    return mask
-
-def loss_midi(midi_hat, midi_gt, window_size=5):
-    
-    assert midi_hat.shape == midi_gt.shape, "Predicted and ground truth MIDI tensors must have the same shape."
-    
-    onset_hat, offset_hat = detect_onset_offset(midi_hat)
-    onset_gt, offset_gt = detect_onset_offset(midi_gt)
-    
-    # Aggregate onsets and offsets across all pitches
-    onset_hat_agg = onset_hat.sum(dim=0) / midi_hat.shape[0]
-    onset_gt_agg = onset_gt.sum(dim=0) / midi_gt.shape[0]
-    offset_hat_agg = offset_hat.sum(dim=0) / midi_hat.shape[0]
-    offset_gt_agg = offset_gt.sum(dim=0) / midi_gt.shape[0]
-    
-    bce_loss = nn.BCELoss()
-    onset_loss = bce_loss(onset_hat_agg, onset_gt_agg)
-    offset_loss = bce_loss(offset_hat_agg, offset_gt_agg)
-    
-    # onset_loss = F.mse_loss(onset_hat_agg, onset_gt_agg)
-    # offset_loss = F.mse_loss(offset_hat_agg, offset_gt_agg)
-    
-    ce_loss = nn.CrossEntropyLoss()
-    pitch_loss = 0
-    
-    for t in range(midi_hat.shape[1]-window_size):
-        midi_hat_agg = midi_hat[:, t:t+window_size].sum(dim=1)
-        midi_gt_agg = midi_gt[:, t:t+window_size].sum(dim=1)
-        pitch_classes_hat = midi_hat_agg % 12
-        pitch_classes_gt = midi_gt_agg % 12
-        pitch_loss += ce_loss(midi_hat_agg, midi_gt_agg.argmax(dim=0))
-    
-    loss = onset_loss + offset_loss + pitch_loss
-    
-    return loss
-
-def compute_midi_loss(midi_hat, midi_gt, active_midi, octave_weight, note_weight, sparse_factor):
-    """
-    Computes the pitch distance loss between the predicted and ground truth MIDI tensors.
-    Loss increase with distance of pitch, except for octave distance
-    Adds the MSE loss of onsets and offsets (MSE for rows with active midi only)
-    
-    L = L_pitch + L_onset + L_offset (+ L_velocity)
-    """
-    assert midi_hat.shape == midi_gt.shape, "Predicted and ground truth MIDI tensors must have the same shape."
-    
-    l_pitch     = 0
-    miss_loss   = 11 # Missing a note: equivalent to 11 semitones mistake
-    
-    # Detect onsets and offsets
-    pred_onsets, pred_offsets = detect_onset_offset(midi_hat, filter=True)
-    gt_onsets, gt_offsets = detect_onset_offset(midi_gt, filter=True)
-    
-    # Pitch distance for every time step
-    for t in range(midi_hat.shape[1]):
-        # Get notes activated at time t
-        pred_column = midi_hat[:, t]
-        gt_column   = midi_gt[:, t]
-        pred_notes  = torch.nonzero(pred_column).squeeze(1)
-        gt_notes    = torch.nonzero(gt_column).squeeze(1)
-        active_indices = torch.nonzero(gt_column, as_tuple=False).squeeze(1)
-        
-        if active_indices.numel() > 0:
-            mask    = pitch_mask(gt_column, active_indices, octave_weight, note_weight)
-            l_pitch += F.l1_loss(pred_column * mask, gt_column * mask)
-
-        # Predicted a note that is not present
-        if len(pred_notes)>0 and len(gt_notes) == 0:
-            l_pitch += miss_loss
-            
-        # Did not predict the note
-        elif len(pred_notes)==0 and len(gt_notes)>0:
-            l_pitch += miss_loss
-    
-    l_pitch /= midi_hat.shape[1]
-    
-    # Onset/ Offset loss
-    l_onset  = sparse_factor * F.mse_loss(pred_onsets[active_midi,:], gt_onsets[active_midi,:])
-    l_offset = sparse_factor * F.mse_loss(pred_offsets[active_midi,:], gt_offsets[active_midi,:])
-    loss     = torch.sum(torch.stack([l_pitch, l_onset, l_offset], dim=0))
-        
-    # We normalize the loss by the size of the midi so that different length MIDI files can be compared
-    normalized_loss = loss / 1#(midi_hat.shape[1] * midi_hat.shape[0])
-    # print(f"Losses: onset= {l_onset}, offset= {l_offset}, pitch= {l_pitch}, total= {loss}, normalized= {normalized_loss}")
-    
-    return normalized_loss
-   
-   
-"""
-Loss
-"""
-def gaussian_kernel_batch(kernel_size=3, sigma=2):
-    """
-    Creates a 1D Gaussian kernel.
-    """
-    kernel = np.exp(-np.linspace(-kernel_size / 2, kernel_size / 2, kernel_size)**2 / (2 * sigma**2))
-    kernel = kernel / kernel.sum()
-    return torch.tensor(kernel, dtype=torch.float32).unsqueeze(0).unsqueeze(0).unsqueeze(-1)
-
-def filter1d_batch(tensor, kernel, axis=2):
-    """
-    Applies a 1D Gaussian filter to a 3D tensor along a specified axis.
-    """
-    if axis == 2:
-        # Apply the kernel to each time step
-        tensor = tensor.permute(0, 2, 1).unsqueeze(1)  # Shape: (batch_size, 1, times, 88)
-        filtered_tensor = F.conv2d(tensor, kernel, padding=(kernel.size(-2) // 2, 0), groups=tensor.size(0)).squeeze(1).permute(0, 2, 1)  # Shape: (batch_size, 88, times)
-    else:
-        raise ValueError("Axis must be 2 for 3D tensor")
-
-    return filtered_tensor
-
-def detect_onset_offset_batch(midi, filter=False):
-    """
-    Detects onsets and offsets
-    Returns one tensor of shape midi with 1s at onsets and offsets, 0 elsewhere
-    If filter=True, applies a gaussian filters to the matrix along the temporal axis
-    """
-    batch_size, _, t = midi.shape
-    onset = torch.zeros_like(midi)
-    offset = torch.zeros_like(midi)
-    
-    # For every time step
-    for time in range(1, t):
-        # Onset: note active at time t and not t-1
-        onset[:, :, time] = ((midi[:, :, time] > 0) & (midi[:, :, time-1] == 0)).float()
-        
-        # Offset: note not active at time t and active at t-1
-        offset[:, :, time] = ((midi[:, :, time] == 0) & (midi[:, :, time-1] > 0)).float()
-    
-    if filter:
-        kernel = gaussian_kernel_batch(15, 5)
-        filtered_onset = filter1d_batch(onset, kernel, axis=2)
-        filtered_offset = filter1d_batch(offset, kernel, axis=2)
-        return filtered_onset, filtered_offset
-    else:
-        return onset, offset
-   
-def compute_midi_loss_batch(midi_hat, midi_gt, active_midi, octave_weight, note_weight, sparse_factor):
-    """
-    Computes the pitch distance loss between the predicted and ground truth MIDI tensors.
-    Loss increase with distance of pitch, except for octave distance
-    Adds the MSE loss of onsets and offsets (MSE for rows with active midi only)
-    
-    L = L_pitch + L_onset + L_offset (+ L_velocity)
-    """
-    assert midi_hat.shape == midi_gt.shape, "Predicted and ground truth MIDI tensors must have the same shape."
-    
-    batch_size, _, t = midi_hat.shape
-    l_pitch     = 0
-    miss_loss   = 11 # Missing a note: equivalent to 11 semitones mistake
-    
-    # Detect onsets and offsets
-    pred_onsets, pred_offsets = detect_onset_offset_batch(midi_hat, filter=True)
-    gt_onsets, gt_offsets = detect_onset_offset_batch(midi_gt, filter=True)
-    
-    # Pitch distance for every time step
-    for time in range(t):
-        # Get notes activated at time t
-        pred_column = midi_hat[:, :, time]
-        gt_column   = midi_gt[:, :, time]
-        
-        
-        # # Compare notes
-        # if len(pred_notes) > 0 and len(gt_notes) > 0:
-        #     for pred_note in pred_notes:
-        #         min_distance = float('inf')
-        #         # Compute the absolute distance between every pair of notes
-        #         # We also consider the predicted notes 1 octave above and bellow
-        #         for gt_note in gt_notes:
-        #             distance = abs(pred_note - gt_note)
-        #             distance_oct_sup = abs(pred_note + 12 - gt_note)
-        #             distance_oct_inf = abs(pred_note - 12 - gt_note)
-        #             min_distance = min([min_distance, distance, distance_oct_sup, distance_oct_inf])
-        #         l_pitch += min_distance
-        
-        for b in range(batch_size):
-            pred_notes  = torch.nonzero(pred_column[b]).squeeze(1)
-            gt_notes    = torch.nonzero(gt_column[b]).squeeze(1)
-            active_indices = torch.nonzero(gt_column[b], as_tuple=False).squeeze(1)
-            
-            if active_indices.numel() > 0:
-                mask    = pitch_mask(gt_column[b], active_indices, octave_weight, note_weight)
-                l_pitch += F.l1_loss(pred_column[b] * mask, gt_column[b] * mask)
-
-            # Predicted a note that is not present
-            if len(pred_notes)>0 and len(gt_notes) == 0:
-                l_pitch += miss_loss
-                
-            # Did not predict the note
-            elif len(pred_notes)==0 and len(gt_notes)>0:
-                l_pitch += miss_loss
-    
-    l_pitch /= t
-    
-    # Onset/ Offset loss
-    l_onset  = sparse_factor * F.mse_loss(pred_onsets[:, active_midi, :], gt_onsets[:, active_midi, :])
-    l_offset = sparse_factor * F.mse_loss(pred_offsets[:, active_midi, :], gt_offsets[:, active_midi, :])
-    loss     = torch.sum(torch.stack([l_pitch, l_onset, l_offset], dim=0))
-        
-    # We normalize the loss by the size of the midi so that different length MIDI files can be compared
-    normalized_loss = loss / (t * 88)
-    print(f"Losses: onset= {l_onset}, offset= {l_offset}, pitch= {l_pitch}, total= {loss}, normalized= {normalized_loss}")
-    
-    return normalized_loss
-   
    
 """
 Train the network
@@ -920,6 +394,7 @@ def warmup_train(model, n_epochs, loader, optimizer, device, debug=False):
     return losses, W_hat, H_hat, H1    
  
 def train(model, train_loader, valid_loader, optimizer, criterion, device, epochs, W0=None, use_wandb=False):
+    eps = 1e-6
     if use_wandb:
         run = wandb.init(
             project=f"{model.__class__.__name__}_train",
@@ -933,43 +408,39 @@ def train(model, train_loader, valid_loader, optimizer, criterion, device, epoch
     train_losses, valid_losses = [], []
     valid_loss_min = np.inf
     
-    for epoch in range(epochs):
+    start_epoch = load_checkpoint("home/ids/edabier/AMT/Unrolled-NMF/models/checkpoint.pt", model, optimizer)
+    
+    for epoch in range(start_epoch, epochs):
         
         train_loss, valid_loss = 0, 0
         
         model.train()
         for i, (M, H) in enumerate(train_loader):
             
-            M = torch.clamp(M, min=1e-4)
+            M = torch.clamp(M, min=eps)
             M = M.to(device)
             H = H.to(device)
             
             # Tracking gpu usage
             gpu_info = get_gpu_info()
-            log_gpu_info(gpu_info, filename="logs/gpu_info_log.csv")
+            log_gpu_info(gpu_info, filename="/home/ids/edabier/AMT/Unrolled-NMF/logs/gpu_info_log.csv")
             
-            W_hat, H_hat, _, _ = model(M, device=device, i=i)
+            W_hat, H_hat, M_hat, _ = model(M, device=device)
         
             # Tracking gpu usage
             gpu_info = get_gpu_info()
-            log_gpu_info(gpu_info, filename="logs/gpu_info_log.csv")
-            
-            # H_hat_r = soft_permutation_match(H_hat, model.H0, rows=True)
+            log_gpu_info(gpu_info, filename="/home/ids/edabier/AMT/Unrolled-NMF/logs/gpu_info_log.csv")
             
             optimizer.zero_grad()
             
-            loss = criterion(H_hat, H)/torch.linalg.norm(H) + torch.linalg.norm(W_hat)/ torch.linalg.norm(W0)
-            
-            # if i%100==0:
-            #     vis_H = H_hat[0].clone()
-            #     print(f"mean H_hat: {torch.mean(vis_H)}")
-            #     spec.vis_cqt_spectrogram(vis_H.detach().cpu(), title="H_hat", use_wandb=use_wandb)
-            #     print(loss)
-            # loss = criterion(H_hat_r, H[0])
+            if W0 is not None:
+                loss = criterion(H_hat, H)/torch.linalg.norm(H) + torch.linalg.norm(W_hat)/ torch.linalg.norm(W0)
+            else:
+                loss = criterion(H_hat, H)/torch.linalg.norm(H)
             
             # Tracking gpu usage
             gpu_info = get_gpu_info()
-            log_gpu_info(gpu_info, filename="logs/gpu_info_log.csv")
+            log_gpu_info(gpu_info, filename="/home/ids/edabier/AMT/Unrolled-NMF/logs/gpu_info_log.csv")
             
             loss.backward()
             
@@ -983,6 +454,14 @@ def train(model, train_loader, valid_loader, optimizer, criterion, device, epoch
             
             train_loss += loss.item()
         
+        if epoch % 5 ==0: # Display the evolution of learned NMF
+            if use_wandb:
+                spec.vis_cqt_spectrogram(M.detach().cpu(), title="original audio")
+                spec.vis_cqt_spectrogram(H.detach().cpu(), title="original H")
+                spec.vis_cqt_spectrogram(M_hat.detach().cpu(), title="recreated audio")
+                spec.vis_cqt_spectrogram(W_hat.detach().cpu(), title="recreated W")
+                spec.vis_cqt_spectrogram(H_hat.detach().cpu(), title="recreated H")
+        
         train_loss /= len(train_loader)
         train_losses.append(train_loss)
         print(f"epoch {epoch}, loss = {train_loss:5f}")
@@ -993,25 +472,28 @@ def train(model, train_loader, valid_loader, optimizer, criterion, device, epoch
         model.eval()
         for M, H in valid_loader:
             
-            M = torch.clamp(M, min=1e-4)
-            M = M.to(device)
-            H = H.to(device)
-            
-            # Tracking gpu usage
-            gpu_info = get_gpu_info()
-            log_gpu_info(gpu_info, filename="logs/gpu_info_log.csv")
-            
             with torch.no_grad():
-                W_hat, H_hat, _, _ = model(M)
             
-            # Tracking gpu usage
-            gpu_info = get_gpu_info()
-            log_gpu_info(gpu_info, filename="logs/gpu_info_log.csv")
+                M = torch.clamp(M, min=eps)
+                M = M.to(device)
+                H = H.to(device)
+                
+                # Tracking gpu usage
+                gpu_info = get_gpu_info()
+                log_gpu_info(gpu_info, filename="/home/ids/edabier/AMT/Unrolled-NMF/logs/gpu_info_log.csv")
             
-            # H_hat_r = soft_permutation_match(H_hat, model.H0, rows=True)
-            # loss = criterion(H_hat_r, H[0])
-            loss = criterion(H_hat, H)
-            valid_loss += loss.item()
+                W_hat, H_hat, _, _ = model(M, device=device)
+                
+                # Tracking gpu usage
+                gpu_info = get_gpu_info()
+                log_gpu_info(gpu_info, filename="/home/ids/edabier/AMT/Unrolled-NMF/logs/gpu_info_log.csv")
+                
+                if W0 is not None:
+                    loss = criterion(H_hat, H)/torch.linalg.norm(H) + torch.linalg.norm(W_hat)/ torch.linalg.norm(W0)
+                else:
+                    loss = criterion(H_hat, H)/torch.linalg.norm(H)
+                    
+                valid_loss += loss.item()
         
         valid_loss /= len(valid_loader)
         valid_losses.append(valid_loss)
@@ -1019,11 +501,15 @@ def train(model, train_loader, valid_loader, optimizer, criterion, device, epoch
         if use_wandb:
             wandb.log({"valid loss": valid_loss})
             
+        save_model(model, epoch, optimizer, directory="/home/ids/edabier/AMT/Unrolled-NMF/models")
+        
+        if epoch % 5 == 0: # Save the model every 5 epochs
+            save_model(model, epoch, optimizer, directory="/home/ids/edabier/AMT/Unrolled-NMF/models", is_permanent=True)
+            
         if valid_loss <= valid_loss_min:
-          print('validation loss decreased ({:.6f} --> {:.6f}).  Saving model ...'.format(
+          print('validation loss decreased ({:.6f} --> {:.6f})'.format(
           valid_loss_min,
           valid_loss))
-          torch.save(model.state_dict(), f'models/{model.__class__.__name__}.pt')
           valid_loss_min = valid_loss
     
     return train_losses, valid_losses, W_hat, H_hat

@@ -26,7 +26,7 @@ def main(num_workers, n_iter, lr, epochs, batch, length, subset, split):
     # Set the multiprocessing start method
     mp.set_start_method('spawn', force=True)
     
-    dtype = torch.float16
+    dtype = None# torch.float16
     shared = True
     clip = True
     aw2d = False
@@ -54,15 +54,11 @@ def main(num_workers, n_iter, lr, epochs, batch, length, subset, split):
     print("Split the dataset - done ✓")
     
     train_set   = utils.LocalMapsDataset(train_data, fixed_length=length, subset=subset, verbose=False, dtype=dtype)
-    # test_set    = utils.LocalMapsDataset(test_data, fixed_length=length, subset=subset, verbose=False, dtype=dtype)
     valid_set   = utils.LocalMapsDataset(valid_data, fixed_length=length, subset=subset, verbose=False, dtype=dtype)
     print("Loaded the datasets - done ✓")
 
     train_sampler   = utils.SequentialBatchSampler(train_set, batch_size=batch)
     train_loader    = DataLoader(train_set, batch_sampler=train_sampler, collate_fn=utils.collate_fn, num_workers=num_workers)
-    
-    # test_sampler   = utils.SequentialBatchSampler(test_set, batch_size=batch)
-    # test_loader     = DataLoader(test_set, batch_sampler=test_sampler, collate_fn=utils.collate_fn, num_workers=num_workers)
 
     valid_sampler   = utils.SequentialBatchSampler(valid_set, batch_size=batch)
     valid_loader    = DataLoader(valid_set, batch_sampler=valid_sampler, collate_fn=utils.collate_fn, num_workers=num_workers)
@@ -74,6 +70,9 @@ def main(num_workers, n_iter, lr, epochs, batch, length, subset, split):
     W_path = 'AMT/Unrolled-NMF/test-data/synth-single-notes'
     ralmu = models.RALMU(l=88, beta=1, W_path=W_path, n_iter=n_iter, n_init_steps=1, shared=shared, return_layers=False, aw_2d=aw2d, clip_H=clip, dtype=dtype)
     ralmu = ralmu.to(dev)
+    
+    
+    W0, _, _, _ = init.init_W(ralmu.W_path, downsample=ralmu.downsample, normalize_thresh=ralmu.norm_thresh, verbose=ralmu.verbose, dtype=ralmu.dtype)
 
     ##########################################################
     print("Preparing the training...")
@@ -82,7 +81,7 @@ def main(num_workers, n_iter, lr, epochs, batch, length, subset, split):
 
     print("Starting training...")
 
-    losses, valid_losses, W_hat, H_hat = utils.train(ralmu, train_loader, valid_loader, optimizer, criterion, dev, epochs, use_wandb=True)
+    losses, valid_losses, W_hat, H_hat = utils.train(ralmu, train_loader, valid_loader, optimizer, criterion, dev, epochs, W0=W0, use_wandb=True)
 
     print("Training complete!")
 
@@ -106,7 +105,6 @@ if __name__ == '__main__':
     epochs = args.epochs
     batch_size = args.batch
     fixed_length = args.length
-    # filter = args.filter
     subset = args.subset
     split = args.split
     

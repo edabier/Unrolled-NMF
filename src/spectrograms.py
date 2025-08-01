@@ -2,11 +2,8 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 import pretty_midi
-import torchaudio.transforms as T
-import torch.nn.functional as F
 import librosa
 import nnAudio.features.cqt as nn_cqt
-import time
 from io import BytesIO
 from PIL import Image
 import warnings
@@ -17,64 +14,17 @@ import wandb
 pretty_midi.pretty_midi.MAX_TICK = 1e10
 
 """
-SFT Spectrogram
-"""
-def stft_spec(signal, sample_rate, n_fft, hop_length, min_mag=1e-5):
-    
-    """
-    Computes the STFT spectrogram
-    n_fft :         number of samples per window
-    hop_length :    number of samples the next window will move
-    min_mag :       min value of stft magnitude that we consider (0 if under this value)
-    """
-    if signal.shape[0] > 1:
-        signal = signal.mean(dim=0, keepdim=True)
-        signal = signal.squeeze(0)
-        
-    window      = torch.hann_window(n_fft)
-    stft        = torch.stft(signal, n_fft, hop_length, window=window, center=False, return_complex=True)
-    stft_mag    = stft.abs()
-    stft_mag    = torch.clamp(stft_mag, min=min_mag)
-    spec        = stft_mag
-    spec_np     = spec.numpy()
-
-    # Convert number of frames into time in s
-    num_frames  = spec.shape[-1]
-    frame_time  = hop_length / sample_rate
-    times       = np.arange(num_frames) * frame_time
-
-    # Convert the frequency bins to frequencies in Hz
-    frequencies = np.fft.rfftfreq(n_fft, d=1/sample_rate)
-    
-    return spec, spec_np, times, frequencies
-
-def vis_spectrogram(spec, times, frequencies, start, stop, min_freq, max_freq):
-    start_idx       = np.searchsorted(times, start)
-    stop_idx        = np.searchsorted(times, stop)
-    freq_start_idx  = np.searchsorted(frequencies, min_freq)
-    freq_stop_idx   = np.searchsorted(frequencies, max_freq)
-    spec_slice = spec[freq_start_idx:freq_stop_idx, start_idx:stop_idx]
-    freq_slice = frequencies[freq_start_idx:freq_stop_idx]
-    time_slice = times[start_idx:stop_idx]
-    
-    plt.figure(figsize=(10, 5))
-    plt.imshow(spec_slice, origin='lower', aspect='auto',
-                extent=[time_slice[0], time_slice[-1],
-                       freq_slice[0]/1000, freq_slice[-1]/1000], cmap='magma')
-    plt.title("Spectrogram (dB)")
-    plt.xlabel("Time (s)")
-    plt.ylabel("Frequency (kHz)")
-    plt.tight_layout()
-    plt.show()
-    return 
-
-"""
 CQT Spectrogram
 """
-def cqt_spec(signal, sample_rate, hop_length=128, fmin=librosa.note_to_hz('A0'), bins_per_octave=36, n_bins=288, normalize_thresh=None, eps=1e-6, dtype=None):
+def cqt_spec(signal, sample_rate, hop_length=128, fmin=librosa.note_to_hz('A0'), bins_per_octave=36, n_bins=288, normalize_thresh=None, dtype=None):
     """
     Computes the CQT spectrogram
     """
+    if dtype is not None:
+        eps = torch.finfo(type=dtype).min
+    else:
+        eps = torch.finfo().min
+    
     if type(signal) == torch.Tensor:
         # Convert to mono if stereo
         signal = signal.squeeze()
@@ -133,6 +83,15 @@ def max_columns(W):
     return W_max
 
 def l1_norm(tensor, threshold, set_min=None):
+    """
+    Computes the sum of the L1 norm of each column of the input vector
+    We normalize each column by this sum if it is below the threshold, otherwise, we set this column to the min_value
+    
+    Args:
+        tensor (torch.tensor): The input tensor to normalize
+        threshold (float): The threshold below which to not normalize the column
+        set_min (bool, optional): Whether to overwrite the values of the columns with norm < threshold with a min_value (default: ``None``)
+    """
     if len(tensor.shape) ==2: 
         l1_norm = torch.sum(torch.abs(tensor), dim=0, keepdim=True)
     else:
@@ -140,6 +99,7 @@ def l1_norm(tensor, threshold, set_min=None):
     mean_norm = torch.mean(l1_norm)
     
     mask = l1_norm >= threshold * mean_norm
+    mask = mask.expand_as(tensor)
     normalized_tensor = tensor / l1_norm
 
     if set_min is not None:
@@ -168,7 +128,6 @@ def vis_cqt_spectrogram(spec, times=None, frequencies=None, start=None, stop=Non
     time_slice  = times[start_idx:stop_idx]
 
     # Convert frequencies to note labels
-    # note_labels = librosa.hz_to_note(frequencies, octave=True, unicode=False)
     note_labels = []
     for freq in frequencies:
         if freq == 0:
@@ -231,68 +190,6 @@ def vis_cqt_spectrogram(spec, times=None, frequencies=None, start=None, stop=Non
     return
 
 """
-ERB Spectrogram
-"""
-def erb_freq(f):
-    return 9.26 * np.log(0.00437 * f + 1)
-
-def erb_filterbank(sample_rate, K_max, f_min, f_max):
-    """
-    Generate the ERB filterbank from f_min to f_max.
-    """
-    freqs = np.logspace(np.log10(f_min), np.log10(f_max), num=K_max)
-    
-    erb_filters = []
-    for f_center in freqs:
-        # Create the filter for each center frequency (Gaussian band-pass filter)
-        erb_filter = np.exp(-0.5 * ((np.arange(sample_rate // 2) - f_center) / (f_center / 2)) ** 2)
-        erb_filter = erb_filter / np.sum(erb_filter)  # Normalize the filter
-        erb_filters.append(erb_filter)
-    
-    erb_filters = np.array(erb_filters)
-    return freqs, erb_filters
-
-def erb_spec(signal, sample_rate, hop_length, K_max=40, f_min=20, f_max=8000):
-    freqs, erb_filters = erb_filterbank(sample_rate, K_max, f_min, f_max)
-    
-    signal = signal.unsqueeze(0) if signal.ndimension() == 1 else signal
-    
-    stft = torch.stft(signal, n_fft=2048, hop_length=hop_length, center=False, return_complex=True)
-    mag_stft = torch.abs(stft)
-    erb_filters = torch.tensor(erb_filters, dtype=torch.float32)
-    erb_filters = erb_filters[:, :mag_stft.shape[1]]
-    
-    spec = []
-    for i in range(mag_stft.shape[-1]):
-        frame = mag_stft[:, :, i].squeeze().numpy()
-        band_energy = np.dot(erb_filters.numpy(), frame)
-        spec.append(band_energy)
-    
-    spec = np.array(spec).T
-    num_frames = spec.shape[1]
-    frame_time = hop_length / sample_rate
-    times = np.arange(num_frames) * frame_time
-    
-    return spec, times, freqs
-
-def vis_erb_spectrogram(spec, freqs, times, start, stop):
-    start_idx = np.searchsorted(times, start)
-    stop_idx = np.searchsorted(times, stop)
-    
-    spec_slice = spec[:, start_idx:stop_idx]
-    spec_slice = 20 * np.log10(spec_slice + 1e-10) 
-    time_slice = times[start_idx:stop_idx]
-    
-    plt.figure(figsize=(10, 5))
-    plt.imshow(spec_slice, origin='lower', aspect='auto',
-               extent=[time_slice[0], time_slice[-1], freqs[0], freqs[-1]])
-    plt.title("ERB Spectrogram")
-    plt.xlabel("Time (s)")
-    plt.ylabel("Frequency (Hz)")
-    plt.tight_layout()
-    plt.show()
-
-"""
 MIDI processing
 """
 def midi_to_pianoroll_tensor(midi_path, waveform, times, hop_length, sr=16000, dtype=None):
@@ -329,10 +226,6 @@ def midi_to_pianoroll_tensor(midi_path, waveform, times, hop_length, sr=16000, d
             offset_idx = torch.argmin(torch.abs(times - note.end))
             onsets[note_idx, onset_idx] = 1
             offsets[note_idx, offset_idx] = 1
-            # if onset_idx < onsets.shape[1]:
-            #     onsets[note_idx, onset_idx] = 1
-            # if offset_idx < offsets.shape[1]:
-            #     offsets[note_idx, offset_idx] = 1
 
     return piano_roll, onsets, offsets, times
 
