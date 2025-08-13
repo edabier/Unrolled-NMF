@@ -1,5 +1,7 @@
 import torch
+import torchaudio
 from torch.utils.data import Dataset, Sampler
+import pandas as pd
 import librosa
 import numpy as np
 import wandb
@@ -29,7 +31,7 @@ def model_infos(model, names=False):
             print(f"Layer: {name} | Size: {param.size()}")
     print(f"The model has {total_params} parameters")
     
-def save_model(model, epoch, optimizer, directory, is_permanent=False):
+def save_model(model, epoch, optimizer, directory, is_permanent=False, name='model_epoch'):
     """
     Overwrite the previous model save if not is_permanent, otherwise, saves a new version of the model
     """
@@ -40,7 +42,7 @@ def save_model(model, epoch, optimizer, directory, is_permanent=False):
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             # Add any other information you want to save
-        }, os.path.join(directory, f'model_epoch_{epoch}.pt'))
+        }, os.path.join(directory, f'{name}_{epoch}.pt'))
     else:
         # Overwrite the temporary model save
         torch.save({
@@ -88,6 +90,38 @@ def log_gpu_info(gpu_info, filename='AMT/Unrolled-NMF/logs/gpu_info_log.csv'):
             if len(info) == 3:  # Ensure name, power draw and memory are captured
                 writer.writerow([timestamp, info[0], info[1], info[2]])
 
+def compute_emissions(file_path, emission_per_kwh=10, start=None):
+    """
+    Computes the CO2e emissions of the energy consumed from a csv file containing the data of power usage and time
+    By default we use EDF's value of 10 CO2e/ kWh in France in 2024
+    """
+    df = pd.read_csv(file_path)
+    df['time'] = pd.to_datetime(df['time'])
+    
+    if start is not None:
+        df = df[df['time'] >= pd.to_datetime(start)]
+
+    # Compute the time difference between consecutive measures
+    time_diffs = df['time'].diff().dt.total_seconds().fillna(0).values
+    time_diffs = torch.tensor(time_diffs, dtype=torch.float32) / 3600
+
+    # Detect larger differences to distinguish runs
+    time_diff_diffs = torch.abs(time_diffs[1:] - time_diffs[:-1])
+    time_diff_diffs = torch.cat([torch.tensor([0.0]), time_diff_diffs])
+    threshold = torch.quantile(time_diff_diffs, 0.95)  # Use a 95% quantile threshold
+    launch_ends = time_diff_diffs > threshold
+
+    # Compute the consumed energy
+    power_usage = torch.tensor(df['power_usage'].values, dtype=torch.float32)
+    energy = power_usage * time_diffs
+    energy[launch_ends] = 0  # Don't count launching energy
+    total_energy_kwh = torch.sum(energy) / 1000  # in kWh
+
+    # Total CO2e emissions in kg of CO2e
+    total_emissions = total_energy_kwh * emission_per_kwh / 1000
+
+    return total_energy_kwh, total_emissions.item()
+
 
 """
 Dataset class and utils functions
@@ -134,9 +168,9 @@ def collate_fn(batch):
     midi_files_padded = torch.stack([pad_by_repeating(midi, max_midi_length) for midi in midi_files])
 
     # Return them as lists to avoid stacking
-    return audio_files_padded, midi_files_padded      
+    return audio_files_padded, midi_files_padded 
 
-class LocalMapsDataset(Dataset):
+class LocalDataset(Dataset):
     """
     Creates a Dataset object from localy saved CQT + midi
 
@@ -256,7 +290,7 @@ def compute_metrics(prediction, ground_truth, time_tolerance=0.05, threshold=0):
 
     accuracy = accuracy_from_recall(rec, len(gt_times), len(gt_pitch))
 
-    return prec, rec, f_mes, accuracy#, gt_notes, pred_notes
+    return prec, rec, f_mes, accuracy
 
 def extract_note_events(piano_roll, threshold=0):
     """
@@ -293,6 +327,23 @@ def accuracy_from_recall(recall, N_gt, N_est):
         return tp / (tp + fp + fn)
     except ZeroDivisionError:
         return 0
+   
+def evaluate_model(model, file, device=None):
+    y, sr = torchaudio.load(f"synth-dataset/audios/{file}")
+    M, times, _ = spec.cqt_spec(y, sr, normalize_thresh=0.1)
+    single_note = 'test-data/synth-single-notes'
+    W, _, _, true_freqs = init.init_W(single_note, normalize_thresh=0.1)
+    midi, _, _, _ = spec.midi_to_pianoroll(f"synth-dataset/midis/{file}", y, times,128,sr)
+
+    model.eval()
+    with torch.no_grad():
+        W_hat, H_hat, M_hat, _ = model.forward(M, device=device)
+        M_hat = M_hat.detach()  
+    
+    _, notes_hat = init.W_to_pitch(W_hat, true_freqs=true_freqs, use_max=True)
+    midi_hat, _ = init.WH_to_MIDI(W_hat, H_hat, notes_hat, normalize=False, threshold=0.5, smoothing_window=5)
+    
+    return compute_metrics(midi, midi_hat) 
    
 """
 Train the network
@@ -415,11 +466,13 @@ def train(model, train_loader, valid_loader, optimizer, criterion, device, epoch
         train_loss, valid_loss = 0, 0
         
         model.train()
-        for i, (M, H) in enumerate(train_loader):
+        for n_item, (M, H) in enumerate(train_loader):
             
             M = torch.clamp(M, min=eps)
             M = M.to(device)
             H = H.to(device)
+            
+            H, norm = spec.l1_norm(H, threshold=0.01, set_min=eps)
             
             # Tracking gpu usage
             gpu_info = get_gpu_info()
@@ -434,9 +487,14 @@ def train(model, train_loader, valid_loader, optimizer, criterion, device, epoch
             optimizer.zero_grad()
             
             if W0 is not None:
-                loss = criterion(H_hat, H)/torch.linalg.norm(H) + torch.linalg.norm(W_hat)/ torch.linalg.norm(W0)
+                loss_H = criterion(H_hat, H)/torch.linalg.norm(H)
+                loss_W = torch.linalg.norm(W_hat)/ torch.linalg.norm(W0)
+                loss = loss_H + loss_W 
             else:
                 loss = criterion(H_hat, H)/torch.linalg.norm(H)
+                
+            if n_item % 100 == 0 and use_wandb:
+                wandb.log({f"loss_H_{epoch}": loss_H, f"loss_W_{epoch}": loss_W})
             
             # Tracking gpu usage
             gpu_info = get_gpu_info()
@@ -456,11 +514,11 @@ def train(model, train_loader, valid_loader, optimizer, criterion, device, epoch
         
         if epoch % 5 ==0: # Display the evolution of learned NMF
             if use_wandb:
-                spec.vis_cqt_spectrogram(M.detach().cpu(), title="original audio")
-                spec.vis_cqt_spectrogram(H.detach().cpu(), title="original H")
-                spec.vis_cqt_spectrogram(M_hat.detach().cpu(), title="recreated audio")
-                spec.vis_cqt_spectrogram(W_hat.detach().cpu(), title="recreated W")
-                spec.vis_cqt_spectrogram(H_hat.detach().cpu(), title="recreated H")
+                spec.vis_cqt_spectrogram(M[0].detach().cpu(), title="original audio", use_wandb=use_wandb)
+                spec.vis_cqt_spectrogram(H[0].detach().cpu(), title="original H", use_wandb=use_wandb)
+                spec.vis_cqt_spectrogram(M_hat[0].detach().cpu(), title="recreated audio", use_wandb=use_wandb)
+                spec.vis_cqt_spectrogram(W_hat[0].detach().cpu(), title="recreated W", use_wandb=use_wandb)
+                spec.vis_cqt_spectrogram(H_hat[0].detach().cpu(), title="recreated H", use_wandb=use_wandb)
         
         train_loss /= len(train_loader)
         train_losses.append(train_loss)
@@ -470,7 +528,7 @@ def train(model, train_loader, valid_loader, optimizer, criterion, device, epoch
             wandb.log({"training loss": train_loss})
     
         model.eval()
-        for M, H in valid_loader:
+        for n_item, (M, H) in enumerate(valid_loader):
             
             with torch.no_grad():
             
@@ -489,11 +547,16 @@ def train(model, train_loader, valid_loader, optimizer, criterion, device, epoch
                 log_gpu_info(gpu_info, filename="/home/ids/edabier/AMT/Unrolled-NMF/logs/gpu_info_log.csv")
                 
                 if W0 is not None:
-                    loss = criterion(H_hat, H)/torch.linalg.norm(H) + torch.linalg.norm(W_hat)/ torch.linalg.norm(W0)
+                    loss_H = criterion(H_hat, H)/torch.linalg.norm(H)
+                    loss_W = torch.linalg.norm(W_hat)/ torch.linalg.norm(W0)
+                    loss = loss_H + loss_W 
                 else:
                     loss = criterion(H_hat, H)/torch.linalg.norm(H)
                     
                 valid_loss += loss.item()
+                
+            if n_item % 100 == 0 and use_wandb:
+                wandb.log({f"valid_loss_H_{epoch}": loss_H, f"valid_loss_W_{epoch}": loss_W})
         
         valid_loss /= len(valid_loader)
         valid_losses.append(valid_loss)
@@ -504,7 +567,7 @@ def train(model, train_loader, valid_loader, optimizer, criterion, device, epoch
         save_model(model, epoch, optimizer, directory="/home/ids/edabier/AMT/Unrolled-NMF/models")
         
         if epoch % 5 == 0: # Save the model every 5 epochs
-            save_model(model, epoch, optimizer, directory="/home/ids/edabier/AMT/Unrolled-NMF/models", is_permanent=True)
+            save_model(model, epoch, optimizer, directory="/home/ids/edabier/AMT/Unrolled-NMF/models", is_permanent=True, name="full_dataset")
             
         if valid_loss <= valid_loss_min:
           print('validation loss decreased ({:.6f} --> {:.6f})'.format(

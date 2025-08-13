@@ -1,5 +1,6 @@
 import torch
 import numpy as np
+import jams
 import matplotlib.pyplot as plt
 import pretty_midi
 import librosa
@@ -24,6 +25,7 @@ def cqt_spec(signal, sample_rate, hop_length=128, fmin=librosa.note_to_hz('A0'),
         eps = torch.finfo(type=dtype).min
     else:
         eps = torch.finfo().min
+        dtype = signal.dtype
     
     if type(signal) == torch.Tensor:
         # Convert to mono if stereo
@@ -109,7 +111,7 @@ def l1_norm(tensor, threshold, set_min=None):
 
     return tensor, l1_norm
 
-def vis_cqt_spectrogram(spec, times=None, frequencies=None, start=None, stop=None, set_note_label=False, add_C8=False, cmap="magma", title=None, x_axis=None, use_wandb=False):
+def vis_cqt_spectrogram(spec, times=None, noFreq=False, frequencies=None, start=None, stop=None, set_note_label=False, add_C8=False, cmap="magma", title=None, x_axis=None, use_wandb=False):
     
     if times is None:
         times = np.arange(spec.shape[1])
@@ -169,8 +171,12 @@ def vis_cqt_spectrogram(spec, times=None, frequencies=None, start=None, stop=Non
 
         # Set y-ticks for Hz and kHz
         step = max(1, len(labels) // 20)
-        plt.yticks(ticks=np.arange(0, len(labels), step),
-                   labels=labels[::step])
+        
+        if noFreq:
+            plt.yticks([])
+        else:
+            plt.yticks(ticks=np.arange(0, len(labels), step),
+                    labels=labels[::step])
     plt.colorbar()
     plt.tight_layout()
     
@@ -228,6 +234,68 @@ def midi_to_pianoroll_tensor(midi_path, waveform, times, hop_length, sr=16000, d
             offsets[note_idx, offset_idx] = 1
 
     return piano_roll, onsets, offsets, times
+
+def jams_to_pianoroll(jams_path, times, hop_length, sr=16000, default_velocity=100, dtype=None):
+    # Load the JAMS file
+    jam = jams.load(jams_path)
+
+    # Extract note annotations (assuming the first annotation is note-based)
+    note_ann = jam.search(namespace='note_midi')
+
+    # Create a PrettyMIDI object and populate it with the notes from JAMS
+    midi = pretty_midi.PrettyMIDI()
+    instrument = pretty_midi.Instrument(program=0)  # Default to piano for simplicity
+
+    for i in range(len(note_ann)):
+        for note in note_ann[i].data:
+            pitch = int(round(note.value))
+            midi_note = pretty_midi.Note(
+                velocity=default_velocity,
+                pitch=pitch,
+                start=note.time,
+                end=note.time + note.duration
+            )
+            instrument.notes.append(midi_note)
+
+    midi.instruments.append(instrument)
+
+    # Now use your existing function logic to create the piano roll
+    note_start = 21
+    note_end = 109
+    fs = sr / hop_length
+    piano_roll = midi.get_piano_roll(fs=fs)
+
+    # Ensure the piano roll is sliced with integer indices
+    piano_roll = piano_roll[note_start:note_end, :]
+
+    # Interpolate to match the desired time axis
+    original_times = np.linspace(0, times[-1], piano_roll.shape[1])
+    interp_func = interp1d(original_times, piano_roll, axis=1, kind='nearest', fill_value=0, bounds_error=False)
+    piano_roll = interp_func(times)
+
+    piano_roll = (piano_roll > 0).astype(np.float32)
+
+    onset_matrix = np.zeros_like(piano_roll)
+    offset_matrix = np.zeros_like(piano_roll)
+
+    for note in instrument.notes:
+        note_idx = note.pitch - note_start
+        onset_idx = np.argmin(np.abs(times - note.start))
+        offset_idx = np.argmin(np.abs(times - note.end))
+        if onset_idx < onset_matrix.shape[1]:
+            onset_matrix[note_idx, onset_idx] = 1
+        if offset_idx < offset_matrix.shape[1]:
+            offset_matrix[note_idx, offset_idx] = 1
+
+    onsets_tensor = torch.from_numpy(onset_matrix).to(dtype)
+    offsets_tensor = torch.from_numpy(offset_matrix).to(dtype)
+
+    return (
+        torch.from_numpy(piano_roll).to(dtype),
+        onsets_tensor,
+        offsets_tensor,
+        times
+    )
 
 def midi_to_pianoroll(midi_path, waveform, times, hop_length, sr=16000, dtype=None):
     midi = pretty_midi.PrettyMIDI(midi_path)
@@ -288,7 +356,62 @@ def cut_midi_segment(midi, onset, offset, start_idx, end_idx):
 
     return midi_segment, onset_segment, offset_segment
 
-def vis_midi(midi_mat, times, start, stop):
+def pianoroll_to_midi(piano_roll, midi_path, times, program=0):
+    """
+    Convert a piano roll tensor to a MIDI file.
+
+    Args:
+        piano_roll (torch.Tensor): Binary piano roll tensor (notes x time).
+        times (torch.Tensor): Time array corresponding to the columns of the piano roll.
+        midi_path (str): Path to save the output MIDI file.
+        note_start (int): MIDI note number for the first row of the piano roll.
+        note_end (int): MIDI note number for the last row of the piano roll.
+        program (int): MIDI program number for the instrument.
+    """
+    note_start, note_end = 21, 109
+    times = torch.tensor(times)
+        
+    midi = pretty_midi.PrettyMIDI()
+    instrument = pretty_midi.Instrument(program=program)
+
+    # Pad piano_roll with a zero at the start and end to detect edge transitions
+    padded_piano_roll = torch.cat([
+        torch.zeros((piano_roll.shape[0], 1), dtype=piano_roll.dtype),
+        piano_roll,
+        torch.zeros((piano_roll.shape[0], 1), dtype=piano_roll.dtype)
+    ], dim=1)
+    padded_times = torch.cat([
+        torch.tensor([0.0]),
+        times,
+        torch.tensor([times[-1] + (times[-1] - times[-2])])
+    ])
+
+    # Iterate over each note (row)
+    for note_idx in range(padded_piano_roll.shape[0]):
+        note_number = note_start + note_idx
+        note_row = padded_piano_roll[note_idx, :]
+        # Find where the note starts (0->1) and ends (1->0)
+        diff = torch.diff(note_row.float())
+        onsets = (diff == 1).nonzero(as_tuple=True)[0]
+        offsets = (diff == -1).nonzero(as_tuple=True)[0]
+
+        # Pair onsets and offsets
+        for onset, offset in zip(onsets, offsets):
+            if onset < offset:
+                start_time = padded_times[onset].item()
+                end_time = padded_times[offset].item()
+                note = pretty_midi.Note(
+                    velocity=100,
+                    pitch=note_number,
+                    start=start_time,
+                    end=end_time
+                )
+                instrument.notes.append(note)
+
+    midi.instruments.append(instrument)
+    midi.write(midi_path)
+
+def vis_midi(midi_mat, times, start, stop, title=None):
     start_idx = np.searchsorted(times, start)
     stop_idx = np.searchsorted(times, stop)
     time_slice = times[start_idx:stop_idx]
@@ -297,13 +420,23 @@ def vis_midi(midi_mat, times, start, stop):
     plt.figure(figsize=(10, 5))
     plt.imshow(midi_mat, origin='lower', aspect='auto',
                 extent=[time_slice[0], time_slice[-1], 21, 109], cmap='Greens')  # pitch range A0-C8
+    if title is not None:
+        plt.title(title)
     plt.xlabel("Time (s)")
     plt.ylabel("Pitch")
     plt.tight_layout()
     plt.show()
     return
 
-def compare_midi(midi_gt, midi_hat, times, start, stop, midi_2=None):
+def compare_midi(midi_gt, midi_hat, times=None, start=None, stop=None, midi_2=None, title=None):
+    
+    if times is None:
+        times = np.arange(midi_gt.shape[1])
+    
+    if start is None:
+        start = 0
+        stop = midi_gt.shape[1]
+        
     start_idx = np.searchsorted(times, start)
     stop_idx = np.searchsorted(times, stop)
     time_slice = times[start_idx:stop_idx]
@@ -317,7 +450,10 @@ def compare_midi(midi_gt, midi_hat, times, start, stop, midi_2=None):
     if midi_2 is not None:
         plt.imshow(midi_2, origin='lower', aspect='auto',
                 extent=[time_slice[0], time_slice[-1], 21, 109], alpha=0.5, cmap="Blues")  # pitch range A0-C8
-    plt.title("Predicted vs. Ground truth MIDI Files")
+    if title is not None:
+        plt.title(title)
+    else:
+        plt.title("Predicted vs. Ground truth MIDI Files")
     plt.xlabel("Time (s)")
     plt.ylabel("Pitch")
     # plt.fill_between([start,stop-0.01],y1=0, y2=20, color="black", edgecolor='grey', hatch="/", label="Not valid MIDI notes")

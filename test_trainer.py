@@ -1,7 +1,3 @@
-import sys
-import matplotlib.pyplot as plt
-import torchaudio
-import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
@@ -10,11 +6,7 @@ import torch.multiprocessing as mp
 from sklearn.model_selection import train_test_split
 from adasp_data_management import music
 import wandb
-import plotly.graph_objects as go
-import pynvml
 import argparse
-import tracemalloc
-import memory_profiler
 
 import src.utils as utils
 import src.models as models
@@ -28,7 +20,7 @@ def main(num_workers, n_iter, lr, epochs, batch, length, subset, split):
     
     dtype = None# torch.float16
     shared = True
-    clip = True
+    clip = False
     aw2d = False
 
     if torch.cuda.is_available():
@@ -41,8 +33,6 @@ def main(num_workers, n_iter, lr, epochs, batch, length, subset, split):
 
     #########################################################
     print("Loading the dataset...")
-    # maps = music.Maps("/tsi/mir/maps")
-    # metadata = maps.pdf_metadata
     path = "/home/ids/edabier/AMT/Unrolled-NMF/MAPS/metadata.csv"
     metadata = pd.read_csv(path)
 
@@ -53,8 +43,8 @@ def main(num_workers, n_iter, lr, epochs, batch, length, subset, split):
     valid_data = valid_data.reset_index(drop=True)
     print("Split the dataset - done ✓")
     
-    train_set   = utils.LocalMapsDataset(train_data, fixed_length=length, subset=subset, verbose=False, dtype=dtype)
-    valid_set   = utils.LocalMapsDataset(valid_data, fixed_length=length, subset=subset, verbose=False, dtype=dtype)
+    train_set   = utils.LocalDataset(train_data, fixed_length=length, subset=subset, verbose=False, dtype=dtype)
+    valid_set   = utils.LocalDataset(valid_data, fixed_length=length, subset=subset, verbose=False, dtype=dtype)
     print("Loaded the datasets - done ✓")
 
     train_sampler   = utils.SequentialBatchSampler(train_set, batch_size=batch)
@@ -68,7 +58,7 @@ def main(num_workers, n_iter, lr, epochs, batch, length, subset, split):
 
     print("Loading the model...")
     W_path = 'AMT/Unrolled-NMF/test-data/synth-single-notes'
-    ralmu = models.RALMU(l=88, beta=1, W_path=W_path, n_iter=n_iter, n_init_steps=1, shared=shared, return_layers=False, aw_2d=aw2d, clip_H=clip, dtype=dtype)
+    ralmu = models.RALMU(l=88, beta=1, W_path=W_path, hidden=16, n_iter=n_iter, n_init_steps=1, shared=shared, return_layers=False, aw_2d=aw2d, clip_H=clip, dtype=dtype)
     ralmu = ralmu.to(dev)
     
     

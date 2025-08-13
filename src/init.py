@@ -159,7 +159,7 @@ def frequency_to_note(frequency, thresh):
     else:
         return torch.tensor(0, dtype=torch.float32)
 
-def W_to_pitch(W, true_freqs, thresh=0.4, H=None, use_max=False, sort=False):
+def W_to_pitch(W, true_freqs=None, thresh=0.4, H=None, use_max=False, sort=False):
     """
     Assign a pitch to every column of W.
     
@@ -169,11 +169,15 @@ def W_to_pitch(W, true_freqs, thresh=0.4, H=None, use_max=False, sort=False):
         thresh (float, optional): Threshold for the conversion from frequency to note (default: ``0.4``)
         us_max (bool, optional): Whether to take the maximum value of each CQT column as the fundamental frequency or select the expected frequency instead
         sort (bool, optional): Whether to sort the frequencies and W columns by increasing order or not
-    """
-    true_freqs.sort()    
+    """  
     frequencies = torch.empty(W.shape[1], dtype=torch.float32)
     notes = torch.empty(W.shape[1])
     freq_range = librosa.cqt_frequencies(W.shape[0], fmin=librosa.note_to_hz('A0'), bins_per_octave=36)
+    
+    if true_freqs is not None:
+        true_freqs.sort()  
+    else:
+        true_freqs = freq_range
     
     for i in range(W.shape[1]):
         if use_max:
@@ -210,7 +214,7 @@ def W_to_pitch(W, true_freqs, thresh=0.4, H=None, use_max=False, sort=False):
     else:
         return frequencies, notes
   
-def WH_to_MIDI(W, H, notes, threshold=0.02, smoothing_window=None, normalize=True):
+def WH_to_MIDI(W, H, notes, threshold=0.02, smoothing_window=None, normalize=True, min_note_length=5, sr=48000):
     """
     Form a MIDI format tensor from W and H
     
@@ -220,18 +224,23 @@ def WH_to_MIDI(W, H, notes, threshold=0.02, smoothing_window=None, normalize=Tru
         notes (torch.tensor): the amount of distinct single notes to transcribe
         threshold (float, optional): The minimum value under which to discard a potential note (default: ``0.02``)
         smoothing_window (float, optional): The size of the window to take the average activation of to adapt the threshold (default: ``None``)
-    """
-    midi = torch.zeros((88, H.shape[1]), dtype=torch.float32)
-    
+        min_note_length (int, optional): the minimum duration of a note, we merge small notes together until we reach this length (default: ``5``)
+        
+        ==> The code checks each segment's length and merges it with the next segment if it is shorter than min_note_length and the gap between segments is also smaller than min_note_length.
+        The intensity is then set to 1, constant for the duration of the note.
+    """    
     if normalize:
         H_max = torch.norm(H, 'fro')
     else:
         H_max = 1
-        
-    activations = {i: torch.zeros(H.shape[1], dtype=torch.float32) for i in range(0, 88)}
+    
+    l, t = H.shape
+    
+    midi = torch.zeros((l, t), dtype=torch.float32)
+    activations = {i: torch.zeros(t, dtype=torch.float32) for i in range(0, l)}
 
-    # Sum the activation rows of the same note
-    for i in range(W.shape[1]):
+    # Set each activation to the corresponding rows of H
+    for i in range(l): # for each note
         midi_note = int(notes[i].item())  # Get the MIDI note
         activations[midi_note] += H[i, :]/ H_max
     
@@ -254,13 +263,26 @@ def WH_to_MIDI(W, H, notes, threshold=0.02, smoothing_window=None, normalize=Tru
             if active_indices[-1]:
                 end_indices = torch.cat((end_indices, torch.tensor([len(active_indices)])))
 
-            # Calculate average intensity and set constant intensity for each segment
-            for start, end in zip(start_indices, end_indices):
-                segment_intensities = activation[start:end]
-                avg_intensity = segment_intensities.mean()
-                activation[start:end] = avg_intensity
+            # Merge segments that are too short
+            merged_start_indices = []
+            merged_end_indices = []
+            i = 0
+            while i < len(start_indices):
+                start = start_indices[i]
+                end = end_indices[i]
 
-            midi[midi_note, active_indices] = activation[active_indices]
+                # Merge with next segments if they are too close
+                while i + 1 < len(start_indices) and start_indices[i + 1] - end_indices[i] - 1 < min_note_length:
+                    i += 1
+                    end = end_indices[i]
+
+                merged_start_indices.append(start)
+                merged_end_indices.append(end)
+                i += 1
+
+            # Calculate average intensity and set constant intensity for each merged segment
+            for start, end in zip(merged_start_indices, merged_end_indices):
+                midi[midi_note, start:end + 1] = 1
     
     active_midi = [i for i in range(88) if (midi[i,:]>0).any().item()]
     
@@ -298,46 +320,3 @@ def MIDI_to_H(midi, active_midi, onsets=None, offsets=None):
                 print(f"Warning: onset {onset_idx} is not before offset {offset_idx}")
 
     return H
-
-def WH_to_MIDI_tensor(W, H, notes, normalize=False, threshold=0.01, smoothing_window=5, adaptative=True):
-    """
-    Form a MIDI format tensor from W and H
-    """
-    batch_size = W.shape[0]
-    midi_list = []
-    active_midi_list = []
-
-    for b in range(batch_size):
-        W_b = W[b]  # (f, l)
-        H_b = H[b]  # (l, t)
-
-        midi = torch.zeros((88, H_b.shape[1]), dtype=torch.float32)
-
-        if normalize:
-            H_max = torch.norm(H_b, 'fro')
-        else:
-            H_max = 1
-
-        activations = {i: torch.zeros(H_b.shape[1], dtype=torch.float32) for i in range(0, 88)}
-
-        # Sum the activation rows of the same note
-        for i in range(W_b.shape[1]):
-            midi_note = int(notes[i].item())  # Get the MIDI note
-            activations[midi_note] += H_b[i, :] / H_max
-
-        for midi_note, activation in activations.items():
-            if midi_note <= 108:
-                if adaptative:
-                    dynamic_threshold = threshold + torch.mean(activation[:smoothing_window])
-                    active_indices = activation > dynamic_threshold
-                else:
-                    active_indices = activation > threshold
-                midi[midi_note, active_indices] = activation[active_indices]
-
-        active_midi = [i for i in range(88) if (midi[i, :] > 0).any().item()]
-
-        midi_list.append(midi)
-        active_midi_list.append(active_midi)
-
-    midi_tensor = torch.stack(midi_list)  # (batch_size, 88, t)
-    return midi_tensor, active_midi_list
