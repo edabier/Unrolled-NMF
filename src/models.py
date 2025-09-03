@@ -2,9 +2,115 @@ import torch.nn as nn
 import torch
 import matplotlib.pyplot as plt
 
+import os, sys
+repo_path = os.path.abspath("/home/ids/edabier/AMT/onsets-and-frames")
+sys.path.append(repo_path)
+from onsets_and_frames import OnsetsAndFrames  # from jongwook's repo
+
 import src.utils as utils
 import src.spectrograms as spec
 import src.init as init
+
+class MU_NMF(nn.Module):
+    """
+    Defines the NMF solving using MU
+    """
+    
+    def __init__(self, n_iter, W_path=None, beta=1, norm_thresh=0.01, dtype=None):
+        super().__init__()
+        
+        self.n_iter = n_iter
+        self.W_path = W_path
+        self.beta = beta
+        self.norm_thresh = norm_thresh
+        self.dtype = dtype
+        if dtype is not None:
+            self.eps = torch.finfo(type=dtype).min
+        else:
+            self.eps = 1e-6
+    
+    def forward(self, M, device=None):
+        
+        batch_size = None
+        _, t = M.shape
+        
+        normalize = self.norm_thresh is not None
+        W, _, _, _ = init.init_W(self.W_path, normalize_thresh=self.norm_thresh, dtype=self.dtype)
+        
+        # Tracking gpu usage
+        if device == "cuda:0":
+            gpu_info = utils.get_gpu_info()
+            utils.log_gpu_info(gpu_info, filename="/home/ids/edabier/AMT/Unrolled-NMF/logs/gpu_info_log.csv")
+            
+        H = init.init_H(W.shape[1], t, W, M, n_init_steps=self.n_iter, beta=self.beta, device=device, batch_size=batch_size, dtype=self.dtype)
+
+        self.norm = None
+        if normalize:
+            H, self.norm = spec.l1_norm(H, threshold=self.norm_thresh, set_min=self.eps)
+        
+        H = torch.clamp(H, min=self.eps)
+            
+        # Tracking gpu usage
+        if device == "cuda:0":
+            gpu_info = utils.get_gpu_info()
+            utils.log_gpu_info(gpu_info, filename="/home/ids/edabier/AMT/Unrolled-NMF/logs/gpu_info_log.csv")
+        
+        for _ in range(self.n_iter):
+            # Compute WH
+            Wh = W @ H
+            Wh = torch.clamp(Wh, min=self.eps)
+
+            Wh_beta_minus_2 = Wh ** (self.beta - 2)
+            Wh_beta_minus_1 = Wh ** (self.beta - 1)
+
+            # Update W
+            numerator_W = (Wh_beta_minus_2 * M) @ H.T
+            denominator_W = Wh_beta_minus_1 @ H.T #+ eps
+            denominator_W = torch.clamp(denominator_W, min=self.eps)
+
+            W = W * (numerator_W / denominator_W)
+
+            # Compute WH again for updating H
+            Wh = W @ H
+            Wh = torch.clamp(Wh, min=self.eps)
+
+            # Update H
+            numerator_H = W.T @ (Wh_beta_minus_2 * M)
+            denominator_H = W.T @ Wh_beta_minus_1 #+ eps
+            denominator_H = torch.clamp(denominator_H, min=self.eps)
+
+            H = H * (numerator_H / denominator_H)
+
+        M_hat = W @ H
+        return W, H, M_hat, self.norm
+
+
+class OnsetAndFramesWrapper(nn.Module):
+    def __init__(self, checkpoint_path, device="cpu"):
+        super().__init__()
+        # Load the pretrained model
+        torch.serialization.add_safe_globals([OnsetsAndFrames])
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        self.model = OnsetsAndFrames(
+            input_features=checkpoint['input_features'],
+            output_features=checkpoint['output_features'],
+            model_complexity=checkpoint.get('model_complexity', 1)
+        )
+        self.model.load_state_dict(checkpoint['state_dict'])
+        self.model.eval()
+        self.device = device
+        self.model.to(device)
+
+    def forward(self, spectrogram):
+        """
+        spectrogram: torch.Tensor of shape (batch, freq_bins, time_steps)
+                     Should be same preprocessing as the pretrained model expects.
+        """
+        with torch.no_grad():
+            spectrogram = spectrogram.to(self.device)
+            onset_pred, frame_pred, velocity_pred = self.model(spectrogram)
+        return onset_pred, frame_pred, velocity_pred
+
 
 class Aw_cnn(nn.Module):
     """
@@ -23,6 +129,10 @@ class Aw_cnn(nn.Module):
         # We use a softplus activation to force > 0 output
         # and to avoid too big updates that could lead to exploding gradients
         self.softplus = nn.Softplus()
+        
+        nn.init.ones_(self.conv1.weight)
+        nn.init.ones_(self.conv2.weight)
+        nn.init.ones_(self.conv3.weight)
 
     # W shape: (f,l)
     def forward(self, x):
@@ -52,6 +162,10 @@ class Aw_2d_cnn(nn.Module):
         # self.bn2 = nn.BatchNorm2d(hidden_channels, dtype=dtype)
         self.relu  = nn.LeakyReLU()
         self.softplus = nn.Softplus()
+        
+        nn.init.ones_(self.conv1.weight)
+        nn.init.ones_(self.conv2.weight)
+        nn.init.ones_(self.conv3.weight)
     
     def forward(self, x):
         if (len(x.shape) == 3):
@@ -84,6 +198,10 @@ class Ah_cnn(nn.Module):
         # We use a softplus activation to force > 0 output
         # and to avoid too big updates that could lead to exploding gradients
         self.softplus = nn.Softplus()
+        
+        nn.init.ones_(self.conv1.weight)
+        nn.init.ones_(self.conv2.weight)
+        nn.init.ones_(self.conv3.weight)
 
     # H shape: (l,t)
     def forward(self, x):
@@ -117,7 +235,7 @@ class RALMU_block(nn.Module):
         use_ah (bool, optional): whether to use Ah in the acceleration of MU (default: ``True``)
         learnable_beta (bool, optional): whether to learn the value of beta (default: ``False``)
     """
-    def __init__(self, beta=1, learnable_beta=False, shared_aw=None, shared_ah=None, use_ah=True, aw_2d=False, clip_H=False, lambda_w=None, lambda_h=None, dtype=None):
+    def __init__(self, beta=1, learnable_beta=False, hidden_channels=16, shared_aw=None, shared_ah=None, use_ah=True, aw_2d=False, clip_H=False, lambda_w=None, lambda_h=None, dtype=None):
         super().__init__()
         
         self.use_ah     = use_ah
@@ -126,15 +244,15 @@ class RALMU_block(nn.Module):
         if dtype is not None:
             self.eps = torch.finfo(type=dtype).min
         else:
-            self.eps = torch.finfo().min
+            self.eps = 1e-6
             
         self.clip_H     = clip_H 
         self.lambda_w   = lambda_w
         self.lambda_h   = lambda_h
         
-        self.Aw = shared_aw if shared_aw is not None else (Aw_2d_cnn(dtype=dtype) if self.aw_2d else Aw_cnn())
+        self.Aw = shared_aw if shared_aw is not None else (Aw_2d_cnn(hidden_channels=hidden_channels, dtype=dtype) if self.aw_2d else Aw_cnn(hidden_channels=hidden_channels, dtype=dtype))
         if self.use_ah:
-            self.Ah = shared_ah if shared_ah is not None else Ah_cnn(dtype=dtype)
+            self.Ah = shared_ah if shared_ah is not None else Ah_cnn(hidden_channels=hidden_channels, dtype=dtype)
             
         if learnable_beta:
             self.beta = nn.Parameter(torch.tensor(beta)) 
@@ -171,13 +289,6 @@ class RALMU_block(nn.Module):
             
         update_W = numerator_W / denominator_W
         
-        if len(torch.nonzero(torch.isnan(W[0].view(-1)))) > 0:
-            print("Nan in input W")
-            spec.vis_cqt_spectrogram(W[0].detach().cpu(), title=f"W with NaNs")
-        if len(torch.nonzero(torch.isnan(H[0].view(-1)))) > 0:
-            print("Nan in input H")
-            spec.vis_cqt_spectrogram(H[0].detach().cpu(), title=f"H with NaNs")
-        
         # Use octave splitting to inject only intra-octave notes in Aw
         if self.aw_2d:
             octave_W = [W[:, :, :4]] + [W[:, :, i+4:i+16] for i in range(0, 84, 12)]
@@ -186,9 +297,6 @@ class RALMU_block(nn.Module):
         else: # Inject W column by column in Aw
             accel_W = torch.cat([self.Aw(W[:, :, i]) for i in range(88)], 2)
             W_new = W * accel_W * update_W
-            
-        if len(torch.nonzero(torch.isnan(accel_W[0].view(-1)))) > 0:
-            print("Nan in accel_W")
         
         # Avoid going to zero by clamping    
         W_new = torch.clamp(W_new, min=self.eps)
@@ -277,7 +385,7 @@ class RALMU(nn.Module):
 
         # Unrolling layers
         self.layers = nn.ModuleList([
-            RALMU_block(shared_aw=shared_aw, shared_ah=shared_ah, use_ah=use_ah, learnable_beta=learnable_beta, aw_2d=aw_2d, clip_H=clip_H, lambda_w=lambda_w, lambda_h=lambda_h, dtype=dtype)
+            RALMU_block(hidden_channels=hidden, shared_aw=shared_aw, shared_ah=shared_ah, use_ah=use_ah, learnable_beta=learnable_beta, aw_2d=aw_2d, clip_H=clip_H, lambda_w=lambda_w, lambda_h=lambda_h, dtype=dtype)
             for _ in range(self.n_iter)
         ])
     
@@ -296,8 +404,9 @@ class RALMU(nn.Module):
             W = W.unsqueeze(0).expand(batch_size, -1, -1)
             
         # Tracking gpu usage
-        gpu_info = utils.get_gpu_info()
-        utils.log_gpu_info(gpu_info, filename="/home/ids/edabier/AMT/Unrolled-NMF/logs/gpu_info_log.csv")
+        if device == "cuda:0":
+            gpu_info = utils.get_gpu_info()
+            utils.log_gpu_info(gpu_info, filename="/home/ids/edabier/AMT/Unrolled-NMF/logs/gpu_info_log.csv")
         
         H = init.init_H(self.l, t, W, M, n_init_steps=self.n_init_steps, beta=self.beta, device=device, batch_size=batch_size, dtype=self.dtype)
 
@@ -308,8 +417,13 @@ class RALMU(nn.Module):
         H = torch.clamp(H, min=self.eps)
             
         # Tracking gpu usage
-        gpu_info = utils.get_gpu_info()
-        utils.log_gpu_info(gpu_info, filename="/home/ids/edabier/AMT/Unrolled-NMF/logs/gpu_info_log.csv")
+        if device == "cuda:0":
+            gpu_info = utils.get_gpu_info()
+            utils.log_gpu_info(gpu_info, filename="/home/ids/edabier/AMT/Unrolled-NMF/logs/gpu_info_log.csv")
+        
+        spec.vis_cqt_spectrogram(M.cpu(), title="Model M input")
+        spec.vis_cqt_spectrogram(W.cpu(), title="Model W input")
+        spec.vis_cqt_spectrogram(H.cpu(), title="Model H input")
         
         if self.return_layers:
             W_layers = []
@@ -318,8 +432,9 @@ class RALMU(nn.Module):
             for i, layer in enumerate(self.layers):
                 W, H = layer(M, W, H)
                 # Tracking gpu usage
-                gpu_info = utils.get_gpu_info()
-                utils.log_gpu_info(gpu_info, filename="/home/ids/edabier/AMT/Unrolled-NMF/logs/gpu_info_log.csv")
+                if device == "cuda:0":
+                    gpu_info = utils.get_gpu_info()
+                    utils.log_gpu_info(gpu_info, filename="/home/ids/edabier/AMT/Unrolled-NMF/logs/gpu_info_log.csv")
                 
                 W_layers.append(W)
                 H_layers.append(H)
@@ -336,7 +451,8 @@ class RALMU(nn.Module):
                 W, H = layer(M, W, H)
                 
                 # Tracking gpu usage
-                gpu_info = utils.get_gpu_info()
-                utils.log_gpu_info(gpu_info, filename="/home/ids/edabier/AMT/Unrolled-NMF/logs/gpu_info_log.csv")
+                if device == "cuda:0":
+                    gpu_info = utils.get_gpu_info()
+                    utils.log_gpu_info(gpu_info, filename="/home/ids/edabier/AMT/Unrolled-NMF/logs/gpu_info_log.csv")
             M_hat = W @ H
             return W, H, M_hat, self.norm

@@ -41,7 +41,8 @@ def cqt_spec(signal, sample_rate, hop_length=128, fmin=librosa.note_to_hz('A0'),
         cqt_transform = nn_cqt.CQT2010v2(sr=sample_rate, hop_length=hop_length, fmin=fmin, n_bins=n_bins, bins_per_octave=bins_per_octave, verbose=False, output_format='Magnitude')
         
         with torch.no_grad():
-            cqt = cqt_transform(signal).to(dtype)
+            cqt = cqt_transform(signal)
+            cqt = cqt.to(dtype)
             cqt = cqt.squeeze(0)
             
         if normalize_thresh is not None:
@@ -111,7 +112,7 @@ def l1_norm(tensor, threshold, set_min=None):
 
     return tensor, l1_norm
 
-def vis_cqt_spectrogram(spec, times=None, noFreq=False, frequencies=None, start=None, stop=None, set_note_label=False, add_C8=False, cmap="magma", title=None, x_axis=None, use_wandb=False):
+def vis_cqt_spectrogram(spec, times=None, noFreq=False, frequencies=None, start=None, stop=None, set_note_label=False, add_C8=False, cmap="magma", title=None, x_axis=None, font_size=None, max_ticks=None, use_wandb=False):
     
     if times is None:
         times = np.arange(spec.shape[1])
@@ -154,11 +155,14 @@ def vis_cqt_spectrogram(spec, times=None, noFreq=False, frequencies=None, start=
         plt.xlabel(x_axis)
     else:
         plt.xlabel("Time (s)")
-    plt.ylabel("Notes" if set_note_label else "Frequency")
+    # plt.ylabel("Notes" if set_note_label else "Frequency")
 
     # Set y-ticks to note names
     if set_note_label: 
-        step = max(1, len(note_labels) // 20)
+        if max_ticks is not None:
+            step = max_ticks
+        else:
+            step = max(1, len(note_labels) // 20)
         plt.yticks(ticks=np.arange(0, len(note_labels), step),
                 labels=note_labels[::step])
     else: 
@@ -170,14 +174,23 @@ def vis_cqt_spectrogram(spec, times=None, noFreq=False, frequencies=None, start=
                 labels.append(f"{f.item() / 1000:.1f} kHz")  # Display kHz for high frequencies
 
         # Set y-ticks for Hz and kHz
-        step = max(1, len(labels) // 20)
+        if max_ticks is not None:
+            step = max_ticks
+        else:
+            step = max(1, len(labels) // 20)
         
         if noFreq:
             plt.yticks([])
         else:
             plt.yticks(ticks=np.arange(0, len(labels), step),
                     labels=labels[::step])
-    plt.colorbar()
+            
+    cbar = plt.colorbar()
+    
+    if font_size is not None:
+        plt.tick_params(axis='y', labelsize=font_size)
+        cbar.ax.tick_params(labelsize=font_size)
+        
     plt.tight_layout()
     
     if use_wandb:
@@ -339,7 +352,13 @@ def midi_to_pianoroll(midi_path, waveform, times, hop_length, sr=16000, dtype=No
 
     return torch.from_numpy(piano_roll).to(dtype), onsets_tensor, offsets_tensor, times
 
-def cut_midi_segment(midi, onset, offset, start_idx, end_idx):
+def cut_midi_segment(midi, onset, offset, start_idx, end_idx, cut_start_notes=False):
+    """
+    Cuts the midi, onset and offset matrix between start_idx and end_idx 
+    by making sure the notes are cut at the end of the segment, and started again at the beginning of the next segment
+    
+    cut_start_notes allows to zero out the notes that are active at time step 0
+    """
     # Ensure notes are turned off at the end of the segment
     active_notes = midi[:, end_idx - 1] > 0
     offset[:, end_idx - 1] = active_notes
@@ -353,6 +372,17 @@ def cut_midi_segment(midi, onset, offset, start_idx, end_idx):
     midi_segment = midi[:, start_idx:end_idx]
     onset_segment = onset[:, start_idx:end_idx]
     offset_segment = offset[:, start_idx:end_idx]
+    
+    if cut_start_notes:
+        active_rows = midi_segment[:, 0] == 1
+        offset_segment[offset_segment == 0] = midi_segment.size(1)  # If never 0, set to last column
+
+        mask = offset_segment == 1
+        first_offset = torch.argmax(mask.int(), dim=1)
+        first_offset[~mask.any(dim=1)] = offset_segment.size(1)
+        
+        for row in torch.where(active_rows)[0]:
+            midi_segment[row, :first_offset[row]] = 0
 
     return midi_segment, onset_segment, offset_segment
 
@@ -411,7 +441,11 @@ def pianoroll_to_midi(piano_roll, midi_path, times, program=0):
     midi.instruments.append(instrument)
     midi.write(midi_path)
 
-def vis_midi(midi_mat, times, start, stop, title=None):
+def vis_midi(midi_mat, times, start=None, stop=None, title=None):
+    if start is None:
+        start = 0
+        stop = times[-1]
+    
     start_idx = np.searchsorted(times, start)
     stop_idx = np.searchsorted(times, stop)
     time_slice = times[start_idx:stop_idx]
@@ -428,7 +462,7 @@ def vis_midi(midi_mat, times, start, stop, title=None):
     plt.show()
     return
 
-def compare_midi(midi_gt, midi_hat, times=None, start=None, stop=None, midi_2=None, title=None):
+def compare_midi(midi_gt, midi_hat, times=None, start=None, stop=None, midi_2=None, title=None, use_wandb=False):
     
     if times is None:
         times = np.arange(midi_gt.shape[1])
@@ -459,5 +493,18 @@ def compare_midi(midi_gt, midi_hat, times=None, start=None, stop=None, midi_2=No
     # plt.fill_between([start,stop-0.01],y1=0, y2=20, color="black", edgecolor='grey', hatch="/", label="Not valid MIDI notes")
     # plt.legend()
     plt.tight_layout()
+    
+    if use_wandb:
+        buf = BytesIO()
+        plt.savefig(buf, format='png')
+        plt.close()
+        buf.seek(0)
+        
+        img = Image.open(buf)
+        img_array = np.array(img)
+
+        # Log the image to wandb
+        wandb.log({"MIDI GT vs MIDI Predicted": wandb.Image(img_array)})
+    
     plt.show()
     return

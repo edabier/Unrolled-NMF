@@ -101,10 +101,10 @@ def init_H(l, t, W, M, n_init_steps, beta=1, device=None, batch_size=None, dtype
     
     if batch_size is not None:
         H = torch.rand(batch_size, l, t, dtype=dtype)
-        H = torch.clamp(H, min=eps)
     else:
         H = torch.rand(l, t, dtype=dtype)
-        H = torch.clamp(H, min=eps)
+        
+    H = torch.clamp(H, min=eps)
         
     if device is not None:
         H = H.to(device)
@@ -214,7 +214,7 @@ def W_to_pitch(W, true_freqs=None, thresh=0.4, H=None, use_max=False, sort=False
     else:
         return frequencies, notes
   
-def WH_to_MIDI(W, H, notes, threshold=0.02, smoothing_window=None, normalize=True, min_note_length=5, sr=48000):
+def WH_to_MIDI(W, H, notes, threshold=0.02, smoothing_window=None, normalize=False, min_note_length=5, sr=48000):
     """
     Form a MIDI format tensor from W and H
     
@@ -288,9 +288,8 @@ def WH_to_MIDI(W, H, notes, threshold=0.02, smoothing_window=None, normalize=Tru
     
     return midi, active_midi
 
-def MIDI_to_H(midi, active_midi, onsets=None, offsets=None):
-    if onsets == None:
-        onsets, offsets = utils.detect_onset_offset(midi)
+def MIDI_to_H(midi, active_midi, onsets, offsets, values_range=127):
+
     H = torch.zeros_like(midi, dtype=torch.float)
 
     for note in active_midi:
@@ -314,7 +313,7 @@ def MIDI_to_H(midi, active_midi, onsets=None, offsets=None):
             if onset_idx < offset_idx:
                 decay_length = offset_idx - onset_idx
                 # Linear decay from 127 to 0
-                decay = torch.linspace(127, 0, steps=decay_length)
+                decay = torch.linspace(values_range, 0, steps=decay_length)
                 H[note, onset_idx:offset_idx] = decay
             else:
                 print(f"Warning: onset {onset_idx} is not before offset {offset_idx}")

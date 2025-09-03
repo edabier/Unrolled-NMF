@@ -12,7 +12,7 @@ import src.spectrograms as spec
 import src.init as init 
 import src.utils as utils
 
-def compute_lengths(metadata, hop_length, downsample):
+def compute_lengths(metadata, hop_length):
     durations = []
     segment_indices = []
     time_steps = []
@@ -20,12 +20,6 @@ def compute_lengths(metadata, hop_length, downsample):
     
     for i, row in tqdm(metadata.iterrows()):
         waveform, _ = torchaudio.load(row.file_path)
-        
-        if downsample:
-            downsample_rate = sr//2
-            downsampler = torchaudio.transforms.Resample(sr, downsample_rate, dtype=waveform.dtype)
-            waveform = downsampler(waveform)
-            sr = downsample_rate
         
         if i%5 == 0:
             gpu_info = utils.get_gpu_info()
@@ -37,25 +31,20 @@ def compute_lengths(metadata, hop_length, downsample):
         
     return np.array(durations), segment_indices, time_steps
 
-def save_audio(metadata_list, row, save_path, downsample, dtype):
+def save_audio(metadata_list, row, save_path, dtype):
     file_name = row['file_path'].split('/MAPS_')[1][:-4] + ".pt"
     try:
         waveform, sr = torchaudio.load(row['file_path'])
-        
-        if downsample:
-            downsample_rate = sr//2
-            downsampler = torchaudio.transforms.Resample(sr, downsample_rate, dtype=waveform.dtype)
-            waveform = downsampler(waveform)
             
         M, times_cqt, _ = spec.cqt_spec(waveform, sr, hop_length, dtype=dtype)
         midi, onset, offset, _ = spec.midi_to_pianoroll(row['midi_path'], waveform, times_cqt, hop_length, sr, dtype=dtype)
 
-        if use_H:
-            active_midi = [i for i in range(88) if (midi[i, :] > 0).any().item()]
-            midi = init.MIDI_to_H(midi, active_midi, onset, offset)
+        active_midi = [i for i in range(88) if (midi[i, :] > 0).any().item()]
+        H = init.MIDI_to_H(midi, active_midi, onset, offset)
         
         metadata_list.append({
             "file_path": f"{save_path}/M/{file_name}",
+            "H_path": f"{save_path}/H/H/{file_name}",
             "midi_path": f"{save_path}/H/midi/{file_name}",
             "onset_path": f"{save_path}/H/onsets/{file_name}",
             "offset_path": f"{save_path}/H/offsets/{file_name}",
@@ -64,6 +53,7 @@ def save_audio(metadata_list, row, save_path, downsample, dtype):
         })
         
         torch.save(M, f"{save_path}/M/{file_name}")
+        torch.save(H, f"{save_path}/H/H/{file_name}")
         torch.save(midi, f"{save_path}/H/midi/{file_name}")
         torch.save(onset, f"{save_path}/H/onsets/{file_name}")
         torch.save(offset, f"{save_path}/H/offsets/{file_name}")
@@ -84,14 +74,11 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser()
     parser.add_argument("--subset", default=1, type=float)
-    parser.add_argument("--downsample", default=False, type=bool)
     args = parser.parse_args()
     
     subset = args.subset
     hop_length = 128
-    downsample = args.downsample
     dtype       = torch.float16
-    use_H       = True
 
     #########################################################
 
@@ -104,7 +91,7 @@ if __name__ == "__main__":
         metadata = metadata.iloc[:num_files]
         
     print("Computing length of files...")
-    durations, segment_indices, time_steps = compute_lengths(metadata, hop_length=hop_length, downsample=False)
+    durations, segment_indices, time_steps = compute_lengths(metadata, hop_length=hop_length)
     
     print("Sorting by length and filtering...")
     metadata = metadata.copy()
@@ -125,7 +112,7 @@ if __name__ == "__main__":
         if idx%5 == 0:
             gpu_info = utils.get_gpu_info()
             utils.log_gpu_info(gpu_info, filename="AMT/Unrolled-NMF/logs/gpu_info_log.csv")
-        save_audio(metadata_list, row, save_path, downsample, dtype)
+        save_audio(metadata_list, row, save_path, dtype)
     
     metadata_df = pd.DataFrame(metadata_list)
     metadata_df.to_csv(f'{save_path}/metadata.csv', index=False)

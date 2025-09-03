@@ -38,12 +38,12 @@ def save_audio(metadata_list, row, save_path, dtype):
         M, times_cqt, _ = spec.cqt_spec(waveform, sr, hop_length, dtype=dtype)
         midi, onset, offset, _ = spec.jams_to_pianoroll(row['jams_path'], times_cqt, hop_length, sr, dtype=dtype)
 
-        if use_H:
-            active_midi = [i for i in range(88) if (midi[i, :] > 0).any().item()]
-            midi = init.MIDI_to_H(midi, active_midi, onset, offset)
+        active_midi = [i for i in range(88) if (midi[i, :] > 0).any().item()]
+        H = init.MIDI_to_H(midi, active_midi, onset, offset)
         
         metadata_list.append({
             "file_path": f"{save_path}/M/{file_name}",
+            "H_path": f"{save_path}/H/H/{file_name}",
             "midi_path": f"{save_path}/H/midi/{file_name}",
             "onset_path": f"{save_path}/H/onsets/{file_name}",
             "offset_path": f"{save_path}/H/offsets/{file_name}",
@@ -52,6 +52,7 @@ def save_audio(metadata_list, row, save_path, dtype):
         })
         
         torch.save(M, f"{save_path}/M/{file_name}")
+        torch.save(H, f"{save_path}/H/H/{file_name}")
         torch.save(midi, f"{save_path}/H/midi/{file_name}")
         torch.save(onset, f"{save_path}/H/onsets/{file_name}")
         torch.save(offset, f"{save_path}/H/offsets/{file_name}")
@@ -77,7 +78,6 @@ if __name__ == "__main__":
     subset = args.subset
     hop_length = 128
     dtype       = torch.float16
-    use_H       = True
 
     #########################################################
 

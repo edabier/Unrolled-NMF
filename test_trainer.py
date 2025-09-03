@@ -39,19 +39,20 @@ def main(num_workers, n_iter, lr, epochs, batch, length, subset, split):
     train_data, test_data   = train_test_split(metadata, train_size=split, random_state=1)
     train_data, valid_data  = train_test_split(train_data, train_size=split, random_state=1)
     train_data = train_data.reset_index(drop=True)
-    test_data = test_data.reset_index(drop=True)
     valid_data = valid_data.reset_index(drop=True)
     print("Split the dataset - done ✓")
     
-    train_set   = utils.LocalDataset(train_data, fixed_length=length, subset=subset, verbose=False, dtype=dtype)
-    valid_set   = utils.LocalDataset(valid_data, fixed_length=length, subset=subset, verbose=False, dtype=dtype)
+    train_set   = utils.LocalDataset(train_data, fixed_length=length, subset=subset, dtype=dtype)
+    valid_set   = utils.LocalDataset(valid_data, use_midi=True, fixed_length=length, subset=subset, dtype=dtype)
     print("Loaded the datasets - done ✓")
 
     train_sampler   = utils.SequentialBatchSampler(train_set, batch_size=batch)
-    train_loader    = DataLoader(train_set, batch_sampler=train_sampler, collate_fn=utils.collate_fn, num_workers=num_workers)
+    collate_fn = utils.create_collate_fn(use_midi=False)
+    train_loader    = DataLoader(train_set, batch_sampler=train_sampler, collate_fn=collate_fn, num_workers=num_workers)
 
     valid_sampler   = utils.SequentialBatchSampler(valid_set, batch_size=batch)
-    valid_loader    = DataLoader(valid_set, batch_sampler=valid_sampler, collate_fn=utils.collate_fn, num_workers=num_workers)
+    collate_fn = utils.create_collate_fn(use_midi=True)
+    valid_loader    = DataLoader(valid_set, batch_sampler=valid_sampler, collate_fn=collate_fn, num_workers=num_workers)
     print("Created the dataloaders - done ✓")
 
     print(f"Train dataset: {len(train_loader)}, valid dataset: {len(valid_loader)}")
@@ -60,7 +61,6 @@ def main(num_workers, n_iter, lr, epochs, batch, length, subset, split):
     W_path = 'AMT/Unrolled-NMF/test-data/synth-single-notes'
     ralmu = models.RALMU(l=88, beta=1, W_path=W_path, hidden=16, n_iter=n_iter, n_init_steps=1, shared=shared, return_layers=False, aw_2d=aw2d, clip_H=clip, dtype=dtype)
     ralmu = ralmu.to(dev)
-    
     
     W0, _, _, _ = init.init_W(ralmu.W_path, downsample=ralmu.downsample, normalize_thresh=ralmu.norm_thresh, verbose=ralmu.verbose, dtype=ralmu.dtype)
 
@@ -101,55 +101,3 @@ if __name__ == '__main__':
     print(f"Starting test_trainer.py with arguments: num_workers={num_workers}, n_iter={n_iter}, lr={lr}, epochs={epochs}, batch_size={batch_size}, fixed_length={fixed_length}, subset={subset} and split={split}")
     
     main(num_workers, n_iter, lr, epochs, batch_size, fixed_length, subset, split)
-    
-    # #########################################################
-    # print("Loading the dataset...")
-    # maps = music.Maps("/tsi/mir/maps")
-    # metadata = maps.pdf_metadata
-
-    # train_data, test_data   = train_test_split(metadata, train_size=split, random_state=1)
-    # train_data, valid_data  = train_test_split(train_data, train_size=split, random_state=1)
-
-    # dtype = torch.float16
-
-    # train_set   = utils.MapsDataset(train_data, fixed_length=fixed_length, subset=subset, verbose=True, sort=filter, filter=filter, dtype=dtype)
-    # test_set    = utils.MapsDataset(test_data, fixed_length=fixed_length, subset=subset, verbose=True, sort=filter, filter=filter, dtype=dtype)
-    # valid_set   = utils.MapsDataset(valid_data, fixed_length=fixed_length, subset=subset, verbose=True, sort=filter, filter=filter, dtype=dtype)
-
-    # train_sampler   = utils.SequentialBatchSampler(train_set, batch_size=batch_size)
-    # train_loader    = DataLoader(train_set, batch_sampler=train_sampler, collate_fn=utils.collate_fn)
-
-    # test_sampler   = utils.SequentialBatchSampler(test_set, batch_size=batch_size)
-    # test_loader     = DataLoader(test_set, batch_sampler=test_sampler, collate_fn=utils.collate_fn)
-
-    # valid_sampler   = utils.SequentialBatchSampler(valid_set, batch_size=batch_size)
-    # valid_loader    = DataLoader(valid_set, batch_sampler=valid_sampler, collate_fn=utils.collate_fn)
-    # print(f"Train dataset: {len(train_loader)}, valid dataset: {len(valid_loader)}")
-    
-    # ##########################################################
-    # print("Loading the model...")
-    # W_path = 'AMT/Unrolled-NMF/test-data/synth-single-notes'
-    # ralmu = models.RALMU(l=88, beta=1, W_path=W_path, n_iter=10, n_init_steps=1, hidden=8, shared=True, return_layers=False, smaller_A=True, dtype=dtype)
-    
-    # ##########################################################
-    # print("Preparing the training...")
-    # optimizer   = torch.optim.AdamW(ralmu.parameters(), lr=lr)
-    # criterion   = nn.MSELoss()
-    # ralmu = ralmu.to(dev)
-    
-    # print("Starting training...")
-    
-    # losses, valid_losses, W_hat, H_hat = utils.train(ralmu, train_loader, valid_loader, optimizer, criterion, dev, epochs)
-    
-    # # if np.abs(losses[0]-losses[1]) > 1e2:
-    # #     losses = losses[1:]
-    # #     valid_losses = valid_losses[1:]
-        
-    # # plt.plot(losses, label='train loss')
-    # # plt.plot(valid_losses, label='valid loss')
-    # # plt.ylabel("MSE")
-    # # plt.xlabel("epochs")
-    # # plt.legend()
-    
-    # print("Training complete!")
-    # pynvml.nvmlShutdown()
