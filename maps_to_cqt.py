@@ -12,9 +12,23 @@ import src.spectrograms as spec
 import src.init as init 
 import src.utils as utils
 
-def compute_lengths(metadata, hop_length):
+"""
+This code saves the MAPS dataset locally as torch tensors and creates a csv file with the location of every file
+
+The metadata.csv file contains:
+    - The paths to audio CQT spectrogram (matrix M)
+    - The paths to corresponding Midi ground truth file
+    - The paths to ground truth H matrix corresponding to the midi file
+    - The paths to ground truth onsets and offsets matrix files
+    - The duration of each audio (in seconds)
+    - The amount of time steps of the file
+"""
+
+def compute_lengths(metadata, hop_length=128):
+    """
+    Computes the duration of every audio file in the metadata csv in seconds and in time steps
+    """
     durations = []
-    segment_indices = []
     time_steps = []
     sr = metadata.iloc[0]["sampling_rate"]
     
@@ -29,9 +43,12 @@ def compute_lengths(metadata, hop_length):
         durations.append(waveform.shape[1]/sr)
         time_steps.append(times_cqt.shape[0])
         
-    return np.array(durations), segment_indices, time_steps
+    return np.array(durations), time_steps
 
-def save_audio(metadata_list, row, save_path, dtype):
+def save_audio(metadata_list, row, save_path, hop_length=128, dtype=None):
+    """
+    Opens the audio and jams files to save the M, H, Midi, Onset and Offset tensors locally
+    """
     file_name = row['file_path'].split('/MAPS_')[1][:-4] + ".pt"
     try:
         waveform, sr = torchaudio.load(row['file_path'])
@@ -77,8 +94,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     subset = args.subset
-    hop_length = 128
-    dtype       = torch.float16
+    # dtype  = torch.float16
 
     #########################################################
 
@@ -91,7 +107,7 @@ if __name__ == "__main__":
         metadata = metadata.iloc[:num_files]
         
     print("Computing length of files...")
-    durations, segment_indices, time_steps = compute_lengths(metadata, hop_length=hop_length)
+    durations, time_steps = compute_lengths(metadata)
     
     print("Sorting by length and filtering...")
     metadata = metadata.copy()

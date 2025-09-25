@@ -75,8 +75,8 @@ def main(num_workers, n_iter, length, subset, split):
     mu_10 = models.MU_NMF(n_iter=10, W_path=W_path, beta=1, norm_thresh=0.01)
     mu_10 = mu_10.to(dev)
     
-    mu_100 = models.MU_NMF(n_iter=100, W_path=W_path, beta=1, norm_thresh=0.01)
-    mu_100 = mu_100.to(dev)
+    mu_10k = models.MU_NMF(n_iter=10000, W_path=W_path, beta=1, norm_thresh=0.01)
+    mu_10k = mu_10k.to(dev)
     print("Model loaded - done ✓")
     
     criterion = nn.MSELoss()
@@ -97,11 +97,11 @@ def main(num_workers, n_iter, length, subset, split):
     wandb.log({"mu_10_maps_prec": np.mean(metrics_mu_10_maps["precision"]), "mu_10_maps_acc": np.mean(metrics_mu_10_maps["accuracy"]), "mu_10_maps_rec": np.mean(metrics_mu_10_maps["recall"]), "mu_10_maps_f": np.mean(metrics_mu_10_maps["f_mesure"]), "mu_10_maps_inf": np.mean(metrics_mu_10_maps["inference_time"])})
     print("MU 10 tested on MAPS - done ✓")
     
-    metrics_mu_100_maps = utils.test_model(mu_100, test_loader_maps, criterion, dev)
-    df_mu_maps = pd.DataFrame.from_dict(metrics_mu_100_maps)
-    df_mu_maps.to_csv("/home/ids/edabier/AMT/Unrolled-NMF/metrics_mu_100_maps.csv")
-    # wandb.log({"mu_100_maps_loss": np.mean(metrics_mu_100_maps["loss"]), "mu_100_maps_inf": np.mean(metrics_mu_100_maps["inference_time"])})
-    wandb.log({"mu_100_maps_prec": np.mean(metrics_mu_100_maps["precision"]), "mu_100_maps_acc": np.mean(metrics_mu_100_maps["accuracy"]), "mu_100_maps_rec": np.mean(metrics_mu_100_maps["recall"]), "mu_100_maps_f": np.mean(metrics_mu_100_maps["f_mesure"]), "mu_100_maps_inf": np.mean(metrics_mu_100_maps["inference_time"])})
+    metrics_mu_10k_maps = utils.test_model(mu_10k, test_loader_maps, criterion, dev)
+    df_mu_maps = pd.DataFrame.from_dict(metrics_mu_10k_maps)
+    df_mu_maps.to_csv("/home/ids/edabier/AMT/Unrolled-NMF/metrics_mu_10k_maps.csv")
+    # wandb.log({"mu_10k_maps_loss": np.mean(metrics_mu_10k_maps["loss"]), "mu_10k_maps_inf": np.mean(metrics_mu_10k_maps["inference_time"])})
+    wandb.log({"mu_10k_maps_prec": np.mean(metrics_mu_10k_maps["precision"]), "mu_10k_maps_acc": np.mean(metrics_mu_10k_maps["accuracy"]), "mu_10k_maps_rec": np.mean(metrics_mu_10k_maps["recall"]), "mu_10k_maps_f": np.mean(metrics_mu_10k_maps["f_mesure"]), "mu_10k_maps_inf": np.mean(metrics_mu_10k_maps["inference_time"])})
     print("MU 100 tested on MAPS - done ✓")
     
     ################ GUITARSET #################
@@ -120,11 +120,11 @@ def main(num_workers, n_iter, length, subset, split):
     wandb.log({"mu_guitarset_10_prec": np.mean(metrics_mu_10_guitarset["precision"]), "mu_10_guitarset_acc": np.mean(metrics_mu_10_guitarset["accuracy"]), "mu_10_guitarset_rec": np.mean(metrics_mu_10_guitarset["recall"]), "mu_10_guitarset_f": np.mean(metrics_mu_10_guitarset["f_mesure"]), "mu_10_guitarset_inf": np.mean(metrics_mu_10_guitarset["inference_time"])})
     print("MU 10 tested on guitarset - done ✓")
     
-    metrics_mu_100_guitarset = utils.test_model(mu_100, test_loader_guitarset, criterion, dev)
-    df_mu_guitarset = pd.DataFrame.from_dict(metrics_mu_100_guitarset)
-    df_mu_guitarset.to_csv("/home/ids/edabier/AMT/Unrolled-NMF/metrics_mu_100_guitarset.csv")
-    # wandb.log({"mu_100_guitarset_loss": np.mean(metrics_mu_100_guitarset["loss"]), "mu_100_guitarset_inf": np.mean(metrics_mu_100_guitarset["inference_time"])})
-    wandb.log({"mu_100_guitarset_prec": np.mean(metrics_mu_100_guitarset["precision"]), "mu_100_guitarset_acc": np.mean(metrics_mu_100_guitarset["accuracy"]), "mu_100_guitarset_rec": np.mean(metrics_mu_100_guitarset["recall"]), "mu_100_guitarset_f": np.mean(metrics_mu_100_guitarset["f_mesure"]), "mu_100_guitarset_inf": np.mean(metrics_mu_100_guitarset["inference_time"])})
+    metrics_mu_10k_guitarset = utils.test_model(mu_10k, test_loader_guitarset, criterion, dev)
+    df_mu_guitarset = pd.DataFrame.from_dict(metrics_mu_10k_guitarset)
+    df_mu_guitarset.to_csv("/home/ids/edabier/AMT/Unrolled-NMF/metrics_mu_10k_guitarset.csv")
+    # wandb.log({"mu_10k_guitarset_loss": np.mean(metrics_mu_10k_guitarset["loss"]), "mu_10k_guitarset_inf": np.mean(metrics_mu_10k_guitarset["inference_time"])})
+    wandb.log({"mu_10k_guitarset_prec": np.mean(metrics_mu_10k_guitarset["precision"]), "mu_10k_guitarset_acc": np.mean(metrics_mu_10k_guitarset["accuracy"]), "mu_10k_guitarset_rec": np.mean(metrics_mu_10k_guitarset["recall"]), "mu_10k_guitarset_f": np.mean(metrics_mu_10k_guitarset["f_mesure"]), "mu_10k_guitarset_inf": np.mean(metrics_mu_10k_guitarset["inference_time"])})
     print("MU 100 tested on guitarset - done ✓")
     
     

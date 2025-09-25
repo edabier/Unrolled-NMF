@@ -10,16 +10,25 @@ import src.utils as utils
 """
 Initialisation NMF
 """
-def first_non_zero(f0):
-    idx         = torch.arange(f0.shape[0], 0, -1)
-    f0_2        = idx * f0
-    non_zero    = torch.argmax(f0_2, 0, keepdim=True)
-    return non_zero
-
-def init_W(folder_path=None, hop_length=128, bins_per_octave=36, n_bins=288, downsample=False, verbose=False, normalize_thresh=None, dtype=None):
+def init_W(folder_path=None, hop_length=128, bins_per_octave=36, n_bins=288, normalize_thresh=None, dtype=None):
     """
     Create a W matrix from all audio files contained in the input path
-    By taking the column of highest energy of the CQT
+    takes the column of highest energy of the CQT
+    If no folder is provided, the W matrix is initialized with 88 columns, with all zeros and only 1s for each column's fundamental frequency
+    
+    Returns:
+        W: the W tensor 
+        freqs: the fundamental frequencies corresponding to every column of W
+        sr: the sample rate of the files in folder_path
+        true_freqs: the fundamental frequencies from A0 to C8
+    
+    Args:
+        folder_path (str, optional): if provided, the path of the folder containing the recordings of single notes. Otherwise, initialize with synthetic data (default: None)
+        hop_length (int, optional): value to compute the CQT (default: 128)
+        bins_per_octave (int, optional): value to compute the CQT (default: 36)
+        n_bins (int, optional): value to compute the CQT (default: 288)
+        normalize_thresh (float, optional): if set, the columns are normalized by their L1 sum if this sum is above the threshold (default: None)
+        dtype: data type of the resulting W tensor
     """
     if dtype is not None:
         eps = torch.finfo(type=dtype).min
@@ -29,7 +38,7 @@ def init_W(folder_path=None, hop_length=128, bins_per_octave=36, n_bins=288, dow
     if folder_path is not None:
         templates = []
         true_freqs     = []
-        file_list = sorted([f for f in os.listdir(folder_path) if f.lower().endswith(('.wav'))]) #or f.lower().endswith(('1.wav'))])
+        file_list = sorted([f for f in os.listdir(folder_path) if f.lower().endswith(('.wav'))])
         
         note_to_midi = {
             'C': 0, 'C#': 1,'D': 2, 'D#': 3, 
@@ -40,12 +49,6 @@ def init_W(folder_path=None, hop_length=128, bins_per_octave=36, n_bins=288, dow
         for fname in file_list:
             path = os.path.join(folder_path, fname)
             y, sr = torchaudio.load(path)
-                
-            if downsample:
-                downsample_rate = sr//2
-                downsampler = torchaudio.transforms.Resample(sr, downsample_rate, dtype=y.dtype)
-                waveform = downsampler(waveform)
-                sr = downsample_rate
             
             duration = y.shape[1] / sr
             min_duration = (n_bins * hop_length) / sr
@@ -76,9 +79,6 @@ def init_W(folder_path=None, hop_length=128, bins_per_octave=36, n_bins=288, dow
         
         # W of shape f * (88*n)
         W = torch.stack(templates, axis=1)
-        
-        if verbose:
-            print("Initialized W for the model from files")
 
     else:
         freqs = librosa.cqt_frequencies(n_bins=n_bins, fmin=librosa.note_to_hz("A0"), bins_per_octave=bins_per_octave)
@@ -93,15 +93,31 @@ def init_W(folder_path=None, hop_length=128, bins_per_octave=36, n_bins=288, dow
         print("Initialized W with synthetic data")
     return W, freqs, sr, true_freqs
 
-def init_H(l, t, W, M, n_init_steps, beta=1, device=None, batch_size=None, dtype=None):
+def init_H(W, M, n_init_steps, beta=1, device=None, dtype=None):
+    """
+    Initializes the H tensor with `n_init_steps` of MU iterations with the β-divergence from a random initialization
+    
+    Args:
+        W (torch.tensor): the W tensor used to update H
+        M (torch.tensor): the M tensor used to update H
+        n_init_steps (int): the number of MU iterations to do
+        beta (int, optional): the value of β for the β-divergence (default: 1)
+        device: the device on which to compute
+        dtype (optional): the data type of the tensor 
+    """
     if dtype is not None:
         eps = torch.finfo(type=dtype).min
     else:
         eps = torch.finfo().min
     
-    if batch_size is not None:
+    if len(M.shape) > 2:
+        batch_size = W.shape[0]
+        l = W.shape[2]
+        t = M.shape[2]
         H = torch.rand(batch_size, l, t, dtype=dtype)
     else:
+        l = W.shape[1]
+        t = M.shape[1]
         H = torch.rand(l, t, dtype=dtype)
         
     H = torch.clamp(H, min=eps)
@@ -127,8 +143,37 @@ def init_H(l, t, W, M, n_init_steps, beta=1, device=None, batch_size=None, dtype
         denominator = torch.clamp(denominator, min=eps)
 
         H = H * (numerator / denominator)
+    H = torch.clamp(H, min=eps, max=min(1, H.max()))
     
     return H
+
+def scale_W(M, W, H, return_lambda=False):
+    """
+    Computes the lambda that minimizes the KL between M and WH
+    And multiplies W by this lambda
+    
+    min_lambda KL(M, lambda WH)
+    """
+    is_batched = M.dim() == 3
+
+    if is_batched:
+        wh = W @ H
+        l1_M = torch.norm(M, p=1, dim=(1, 2))
+        l1_WH = torch.norm(wh, p=1, dim=(1, 2))
+        lambda_factor = l1_M / l1_WH
+        lambda_factor = lambda_factor.view(-1, 1, 1)
+        W = W * lambda_factor
+    else:
+        wh = W @ H
+        l1_M = torch.norm(M, p=1)
+        l1_WH = torch.norm(wh, p=1)
+        lambda_factor = l1_M / l1_WH
+        W = W * lambda_factor
+
+    if return_lambda:
+        return W, lambda_factor
+    else:
+        return W
 
 
 """
@@ -161,7 +206,7 @@ def frequency_to_note(frequency, thresh):
 
 def W_to_pitch(W, true_freqs=None, thresh=0.4, H=None, use_max=False, sort=False):
     """
-    Assign a pitch to every column of W.
+    Assign a pitch to every column of W by using the frequency of max energy or by refering to the true_freqs
     
     Args:
         W (torch.tensor): The W tensor (notes' spectrograms dictionnary)
@@ -289,7 +334,16 @@ def WH_to_MIDI(W, H, notes, threshold=0.02, smoothing_window=None, normalize=Fal
     return midi, active_midi
 
 def MIDI_to_H(midi, active_midi, onsets, offsets, values_range=127):
-
+    """
+    Generates a H tensor from a MIDI by setting linearly decreasing values to H rows from onsets to offsets.
+    
+    Args:
+        midi (torch.tensor): the midi tensor to create H from
+        active_midi (list): the rows of the midi file with active notes
+        onsets (torch.tensor): the tensor containing the time steps with notes turning on (onsets)
+        offsets (torch.tensor): the tensor containing the time steps with notes turning off (offsets)
+        valus_range (int, optional): the max value from which the H row linearly decreases (default: 127)
+    """
     H = torch.zeros_like(midi, dtype=torch.float)
 
     for note in active_midi:

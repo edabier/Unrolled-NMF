@@ -19,7 +19,17 @@ CQT Spectrogram
 """
 def cqt_spec(signal, sample_rate, hop_length=128, fmin=librosa.note_to_hz('A0'), bins_per_octave=36, n_bins=288, normalize_thresh=None, dtype=None):
     """
-    Computes the CQT spectrogram
+    Computes the CQT spectrogram of an input signal
+    
+    Args:
+        signal (torch.tensor or numpy.array): the input signal of which to compute the CQT spectrogram
+        sample_rate (int): the sample rate of the input signal
+        hop_length (int, optional): parameter of the CQT (default: 128)
+        fmin (optional): the minimum frequency of the CQT frequency axis
+        bins_per_octave (int, optional): parameter of the CQT (default: 36)
+        n_bins (int, optional): parameter of the CQT (default: 288)
+        norm_thresh (float, optional): whether to normalize the CQT columns by their L1 sum if this sum is above the threshold or not
+        dtype: the data type of the resulting spectrogram
     """
     if dtype is not None:
         eps = torch.finfo(type=dtype).min
@@ -75,15 +85,6 @@ def cqt_spec(signal, sample_rate, hop_length=128, fmin=librosa.note_to_hz('A0'),
         return cqt, times, frequencies
     else:
         return torch.from_numpy(cqt), times, frequencies
-    
-def max_columns(W):
-    max_values, _ = torch.max(W, dim=0)
-    W_max = torch.zeros_like(W)
-    _, max_indices = torch.max(W, dim=0)
-    for col in range(W.shape[1]):
-        W_max[max_indices[col], col] = max_values[col]
-
-    return W_max
 
 def l1_norm(tensor, threshold, set_min=None):
     """
@@ -112,16 +113,28 @@ def l1_norm(tensor, threshold, set_min=None):
 
     return tensor, l1_norm
 
-def vis_cqt_spectrogram(spec, times=None, noFreq=False, frequencies=None, start=None, stop=None, set_note_label=False, add_C8=False, cmap="magma", title=None, x_axis=None, font_size=None, max_ticks=None, use_wandb=False):
+def vis_cqt_spectrogram(spec, times=None, noFreq=False, frequencies=None, start=0, stop=-1, set_note_label=False, add_C8=False, cmap="magma", title=None, x_axis=None, font_size=None, max_ticks=None, use_wandb=False):
+    """
+    Helper function to visualize spectrograms
     
+    Args:
+        spec: the spectrogram to visualize (needs to be set to cpu)
+        times: the time values to be set as the x axis
+        noFreq (bool, optional): if True, the frequency axis is not displayed
+        frequencies: the frequency values to be set as the y axis
+        start (int, optional): the time step from which to start representing the spectrogram (default: 0)
+        stop (int, optional): the time step from which to end representing the spectrogram (default: -1)
+        set_note_label (bool, optional): whether to display note labels as the y-axis or the frequencies (default: False)
+        add_C8 (bool, optional): whether to add a horizontal line at C8 (the end of the MIDI range) (default: False)
+        use_wandb (bool, optional): whether to display the spectrogram on the current wandb project
+    """
     if times is None:
         times = np.arange(spec.shape[1])
     
     if frequencies is None:
         frequencies = np.arange(spec.shape[0])
     
-    if start is None:
-        start = 0
+    if stop == -1:
         stop = spec.shape[1]
         
     start_idx       = np.searchsorted(times, start)
@@ -211,7 +224,72 @@ def vis_cqt_spectrogram(spec, times=None, noFreq=False, frequencies=None, start=
 """
 MIDI processing
 """
-def midi_to_pianoroll_tensor(midi_path, waveform, times, hop_length, sr=16000, dtype=None):
+def midi_to_pianoroll(midi_path, waveform, times, hop_length=128, sr=16000, dtype=None):
+    """
+    Converts a midi file into a prettyMidi tensor format
+    
+    Args:
+        midi_path (str): the path of the midi file (.mid extension)
+        waveform (tensor): the signal corresponding to this midi file, used to infer the duration of the midi tensor
+        times (tensor): the time steps of the waveform, used to infer the duration of the midi tensor
+        hop_length (int, optional): used to compute the sample frequency of the midi tensor (default: 128)
+        sr (int, optional): the sample rate of the signal, used to compute the fs of the midi tensor (default: 16000)
+        dtype: the data type of the returned midi tensor
+    """
+    midi = pretty_midi.PrettyMIDI(midi_path)
+    
+    n_tracks = len(midi.instruments)
+
+    # Keep only piano keys (A0-C8)
+    note_start = 21
+    note_end = 109
+
+    # Get the piano roll from PrettyMIDI
+    piano_roll = midi.get_piano_roll(fs=sr / hop_length)[note_start:note_end]
+
+    # Generate time axis for the MIDI file
+    num_samples = waveform.shape[0]
+    duration = num_samples / sr
+    
+    original_times = np.linspace(0, times[-1], piano_roll.shape[1])
+    interp_func = interp1d(original_times, piano_roll, axis=1, kind='nearest', fill_value=0, bounds_error=False)
+    piano_roll = interp_func(times)
+    
+    piano_roll = (piano_roll > 0).astype(np.float32)
+    
+    onset_matrix = np.zeros_like(piano_roll)
+    offset_matrix = np.zeros_like(piano_roll)
+
+    # Fill onset and offset matrices
+    for instrument in midi.instruments:
+        for note in instrument.notes:
+            note_idx = note.pitch - note_start
+            onset_idx = np.argmin(np.abs(times - note.start))
+            offset_idx = np.argmin(np.abs(times - note.end))
+            if onset_idx < onset_matrix.shape[1]:
+                onset_matrix[note_idx, onset_idx] = 1
+            if offset_idx < offset_matrix.shape[1]:
+                offset_matrix[note_idx, offset_idx] = 1
+
+    # Convert to tensors
+    onsets_tensor = torch.from_numpy(onset_matrix).to(dtype)
+    offsets_tensor = torch.from_numpy(offset_matrix).to(dtype)
+
+    return torch.from_numpy(piano_roll).to(dtype), onsets_tensor, offsets_tensor, times
+
+def midi_to_pianoroll_tensor(midi_path, waveform, times, hop_length=128, sr=16000, dtype=None):
+    """
+    /!\ Torch version of the previous function
+    Converts a midi file into a prettyMidi tensor format
+    
+    Args:
+        midi_path (str): the path of the midi file (.mid extension)
+        waveform (tensor): the signal corresponding to this midi file, used to infer the duration of the midi tensor
+        times (tensor): the time steps of the waveform, used to infer the duration of the midi tensor
+        hop_length (int, optional): used to compute the sample frequency of the midi tensor (default: 128)
+        sr (int, optional): the sample rate of the signal, used to compute the fs of the midi tensor (default: 16000)
+        dtype: the data type of the returned midi tensor
+    """
     midi = pretty_midi.PrettyMIDI(midi_path)
     
     n_tracks = len(midi.instruments)
@@ -248,7 +326,18 @@ def midi_to_pianoroll_tensor(midi_path, waveform, times, hop_length, sr=16000, d
 
     return piano_roll, onsets, offsets, times
 
-def jams_to_pianoroll(jams_path, times, hop_length, sr=16000, default_velocity=100, dtype=None):
+def jams_to_pianoroll(jams_path, times, hop_length=128, sr=16000, default_velocity=100, dtype=None):
+    """
+    Converts a jams file into a prettyMidi tensor format
+    
+    Args:
+        jams_path (str): the path of the jams file (.jams extension)
+        times (tensor): the time steps of the waveform, used to infer the duration of the midi tensor
+        hop_length (int, optional): used to compute the sample frequency of the midi tensor (default: 128)
+        sr (int, optional): the sample rate of the signal, used to compute the fs of the midi tensor (default: 16000)
+        default_velocity (int, optional): if the jams file doesn't contain the velocity data, set the note's velocity (default: 100)
+        dtype: the data type of the returned midi tensor
+    """
     # Load the JAMS file
     jam = jams.load(jams_path)
 
@@ -310,48 +399,6 @@ def jams_to_pianoroll(jams_path, times, hop_length, sr=16000, default_velocity=1
         times
     )
 
-def midi_to_pianoroll(midi_path, waveform, times, hop_length, sr=16000, dtype=None):
-    midi = pretty_midi.PrettyMIDI(midi_path)
-    
-    n_tracks = len(midi.instruments)
-
-    # Keep only piano keys (A0-C8)
-    note_start = 21
-    note_end = 109
-
-    # Get the piano roll from PrettyMIDI
-    piano_roll = midi.get_piano_roll(fs=sr / hop_length)[note_start:note_end]
-
-    # Generate time axis for the MIDI file
-    num_samples = waveform.shape[0]
-    duration = num_samples / sr
-    
-    original_times = np.linspace(0, times[-1], piano_roll.shape[1])
-    interp_func = interp1d(original_times, piano_roll, axis=1, kind='nearest', fill_value=0, bounds_error=False)
-    piano_roll = interp_func(times)
-    
-    piano_roll = (piano_roll > 0).astype(np.float32)
-    
-    onset_matrix = np.zeros_like(piano_roll)
-    offset_matrix = np.zeros_like(piano_roll)
-
-    # Fill onset and offset matrices
-    for instrument in midi.instruments:
-        for note in instrument.notes:
-            note_idx = note.pitch - note_start
-            onset_idx = np.argmin(np.abs(times - note.start))
-            offset_idx = np.argmin(np.abs(times - note.end))
-            if onset_idx < onset_matrix.shape[1]:
-                onset_matrix[note_idx, onset_idx] = 1
-            if offset_idx < offset_matrix.shape[1]:
-                offset_matrix[note_idx, offset_idx] = 1
-
-    # Convert to tensors
-    onsets_tensor = torch.from_numpy(onset_matrix).to(dtype)
-    offsets_tensor = torch.from_numpy(offset_matrix).to(dtype)
-
-    return torch.from_numpy(piano_roll).to(dtype), onsets_tensor, offsets_tensor, times
-
 def cut_midi_segment(midi, onset, offset, start_idx, end_idx, cut_start_notes=False):
     """
     Cuts the midi, onset and offset matrix between start_idx and end_idx 
@@ -392,10 +439,7 @@ def pianoroll_to_midi(piano_roll, midi_path, times, program=0):
 
     Args:
         piano_roll (torch.Tensor): Binary piano roll tensor (notes x time).
-        times (torch.Tensor): Time array corresponding to the columns of the piano roll.
         midi_path (str): Path to save the output MIDI file.
-        note_start (int): MIDI note number for the first row of the piano roll.
-        note_end (int): MIDI note number for the last row of the piano roll.
         program (int): MIDI program number for the instrument.
     """
     note_start, note_end = 21, 109
@@ -442,6 +486,9 @@ def pianoroll_to_midi(piano_roll, midi_path, times, program=0):
     midi.write(midi_path)
 
 def vis_midi(midi_mat, times, start=None, stop=None, title=None):
+    """
+    Helper function to visualize a midi tensor
+    """
     if start is None:
         start = 0
         stop = times[-1]
@@ -463,7 +510,9 @@ def vis_midi(midi_mat, times, start=None, stop=None, title=None):
     return
 
 def compare_midi(midi_gt, midi_hat, times=None, start=None, stop=None, midi_2=None, title=None, use_wandb=False):
-    
+    """
+    Helper function to visualize 2 or 3 midi tensors on top of each other for comparison
+    """
     if times is None:
         times = np.arange(midi_gt.shape[1])
     
@@ -490,8 +539,6 @@ def compare_midi(midi_gt, midi_hat, times=None, start=None, stop=None, midi_2=No
         plt.title("Predicted vs. Ground truth MIDI Files")
     plt.xlabel("Time (s)")
     plt.ylabel("Pitch")
-    # plt.fill_between([start,stop-0.01],y1=0, y2=20, color="black", edgecolor='grey', hatch="/", label="Not valid MIDI notes")
-    # plt.legend()
     plt.tight_layout()
     
     if use_wandb:
