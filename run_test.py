@@ -14,6 +14,18 @@ import src.models as models
 import src.spectrograms as spec
 import src.init as init
 
+"""
+This code runs tests of the RALMU model as well as 10 and 10000 iterations of the classic MU algorithm
+The tests are carried out on the MAPS and Guitarset dataset from locally saved version (obtained from the `maps_to_cqt.py` and `guitarset_to_cqt.py` files)
+
+For every point of the dataset and for the 3 models, we compute:
+    - recall
+    - accuracy
+    - precision
+    - f_mesure
+    - inference time
+"""
+
 def main(num_workers, n_iter, length, subset, split):
     
     # Set the multiprocessing start method
