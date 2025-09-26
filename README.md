@@ -18,6 +18,10 @@ We propose to solve the NMF using the MU algorithm, with the $\beta$-divergence 
 $$ W \leftarrow W \odot \boldsymbol{A_W(W)} \odot \frac{[(WH)^{\beta - 2}.M]H^T}{[WH]^{\beta -1} H^T}$$
 $$H \leftarrow H \odot \boldsymbol{A_H(H)} \odot \frac{W^T[(WH)^{\beta - 2}.M]}{W^T[WH]^{\beta -1}}$$ 
 
+### Requirements
+
+To safely use the code of this repository, one needs to install the packages found in the `requirements.txt` file, as well as the **adasp_data_management** from Télécom Paris' [ADASP team Gitlab repository](https://gitlab.telecom-paris.fr/adasp/) to access the datasets (or just use any other access to **MAPS** and **Guitarset**).
+
 ### Structure
 
 **/src**:
