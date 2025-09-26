@@ -3,6 +3,21 @@ Deep unrolled NMF methods for Automatic Music Transcription:
 
 This repository contains an unrolled version of the Multiplicative Updates algorithm to solve the NMF for Automatic Music Transcription, based on the work of Christophe Kervazo and Jérémy Cohen  [[1]](#1) [[2]](#2).
 
+The main goal is to get the transcription of an audio file represented by its CQT spectrogram, a tensor $\boldsymbol{M}$, by solving the NMF: $\boldsymbol{M} \simeq \boldsymbol{WH}$ where:
+
+- $\boldsymbol{W}$: dictionnary tensor containing the spectrum of each individual notes of the recording.
+
+- $\boldsymbol{H}$: activation tensor containing the moments when each note is activated througout the recording.
+
+<p align="center">
+<img src=https://github.com/edabier/Unrolled-NMF/blob/a533e2583d1874db33e63e65dfe44665fd3db9d1/images/illustration-NMF.png width=500>
+</p>
+
+We propose to solve the NMF using the MU algorithm, with the $\beta$-divergence cost function, and we **unroll** this iterative algorithm, each iteration acting like a neural network layer, inside which we add **acceleration factors**, that are predicted by **CNNs** ($A_W$ and $A_H$):
+
+$$ W \leftarrow W \odot \boldsymbol{A_W(W)} \odot \frac{[(WH)^{\beta - 2}.M]H^T}{[WH]^{\beta -1} H^T}$$
+$$H \leftarrow H \odot \boldsymbol{A_H(H)} \odot \frac{W^T[(WH)^{\beta - 2}.M]}{W^T[WH]^{\beta -1}}$$ 
+
 ### Structure
 
 **/src**:
