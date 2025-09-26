@@ -55,7 +55,22 @@ The models are saved under **/models**.
 
 - The `test_models.sh` file launches the function to test the models (*compute some metrics on the provided test datasets*) on the cluster.
 
-- The `maps_to_cqt.sh` and `guitarset_to_cqt.sh` files launch the python script saving locally the MAPS [[4]](#4) and Guitarset [[5]](#5) datasets.
+- The `maps_to_cqt.sh` and `guitarset_to_cqt.sh` files launch the python script saving locally the MAPS [[4]](#4) and Guitarset [[5]](#5) datasets. To use them, one needs to create the following directories:
+
+```
+{dataset_name}
+└─── M
+│   │   //
+└─── H
+│   └─── H
+│       │   //
+│   └─── midi
+│       │   //
+│   └─── onsets
+│       │   //
+│   └─── offsets
+│       │   //
+```
 
 ## References
 <a id="1">[1]</a> 
