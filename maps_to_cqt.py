@@ -94,7 +94,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     subset = args.subset
-    # dtype  = torch.float16
+    dtype  = torch.float16
 
     #########################################################
 
@@ -117,7 +117,6 @@ if __name__ == "__main__":
     
     filter_condition = metadata['duration'] > 60
     indices = metadata.index.to_list()
-    
     metadata = metadata[filter_condition].reset_index(drop=True)
     
     print("Computing and saving the CQT...", len(metadata))

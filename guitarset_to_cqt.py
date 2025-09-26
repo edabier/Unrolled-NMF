@@ -7,6 +7,8 @@ import torch
 from tqdm import trange
 from tqdm import tqdm
 import argparse
+import os
+import csv
 
 import src.spectrograms as spec 
 import src.init as init 
@@ -23,6 +25,41 @@ The metadata.csv file contains:
     - The duration of each audio (in seconds)
     - The amount of time steps of the file
 """
+
+def create_guitarset_metadata(path):
+
+    # Define the directories
+    path = "/tsi/mir/guitarset/"
+    annotations_dir = path+"annotations"
+    audio_dir = path+"audio_mono-mic"
+
+    # Get the list of .jams and .wav files
+    jams_files = [f for f in os.listdir(annotations_dir) if f.endswith('.jams')]
+    wav_files = [f for f in os.listdir(audio_dir) if f.endswith('.wav')]
+
+    # Extract the base filenames (without extension) for matching
+    jams_basenames = [os.path.splitext(f)[0] for f in jams_files]
+    wav_basenames = [os.path.splitext(f)[0][:-4] for f in wav_files]
+
+    jams_basenames
+
+    # Create a list of tuples with matched paths
+    matched_pairs = []
+    for jams_file, jams_base in zip(jams_files, jams_basenames):
+        if jams_base in wav_basenames:
+            wav_file = jams_base + "_mic.wav"
+            jams_path = os.path.join(annotations_dir, jams_file)
+            wav_path = os.path.join(audio_dir, wav_file)
+            matched_pairs.append((jams_path, wav_path))
+
+    # Write the matched pairs to a CSV file
+    csv_filename = f"{path}/metadata.csv"
+    with open(csv_filename, mode='w', newline='', encoding='utf-8') as csv_file:
+        writer = csv.writer(csv_file)
+        writer.writerow(["jams_path", "file_path"])  # Header
+        writer.writerows(matched_pairs)
+
+    print(f"CSV file '{csv_filename}' created with {len(matched_pairs)} rows.")
 
 def compute_lengths(metadata, hop_length=128):
     """
@@ -98,7 +135,15 @@ if __name__ == "__main__":
     #########################################################
 
     print("Loading the dataset...")
-    metadata = pd.read_csv("/home/ids/edabier/AMT/Unrolled-NMF/Guitarset/metadata.csv")
+    
+    metadata_path = "/home/ids/edabier/AMT/Unrolled-NMF/Guitarset"
+    
+    # Make sure the base metadata csv exists, otherwise, create it
+    if os.path.isfile(metadata_path+"/metadata.csv"):
+        metadata = pd.read_csv(metadata_path+"/metadata.csv")
+    else:
+        create_guitarset_metadata(metadata_path)
+        metadata = pd.read_csv(metadata_path+"/metadata.csv")
     
     if subset is not None:
         num_files = int(len(metadata) * subset)
@@ -115,7 +160,6 @@ if __name__ == "__main__":
     
     # filter_condition = metadata['duration'] > 60
     indices = metadata.index.to_list()
-    
     # metadata = metadata[filter_condition].reset_index(drop=True)
     
     print("Computing and saving the CQT...", len(metadata))

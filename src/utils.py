@@ -103,6 +103,13 @@ def log_gpu_info(gpu_info, filename='AMT/Unrolled-NMF/logs/gpu_info_log.csv'):
     """
     Writes the gpu information retrieved from nvidia-smi to a csv file
     """
+    
+    # If there is no csv log file, create one
+    if not os.path.isfile(filename):
+        with open(filename, mode='a', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerow(["time", "partition_name", "power_usage", "memory_usage"])
+            
     with open(filename, mode='a', newline='') as file:
         writer = csv.writer(file)
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
