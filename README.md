@@ -10,7 +10,7 @@ The main goal is to get the transcription of an audio file represented by its CQ
 - $\boldsymbol{H}$: activation tensor containing the moments when each note is activated througout the recording.
 
 <p align="center">
-<img src=https://github.com/edabier/Unrolled-NMF/blob/a533e2583d1874db33e63e65dfe44665fd3db9d1/img/illustration-NMF.png width=500>
+<img src=https://github.com/edabier/Unrolled-NMF/blob/5abe4166f4774bc13b81bc5a5618a40b6ad60907/img/illustration-NMF.png width=500>
 </p>
 
 We propose to solve the NMF using the MU algorithm, with the $\beta$-divergence cost function, and we **unroll** this iterative algorithm, each iteration acting like a neural network layer, inside which we add **acceleration factors**, that are predicted by **CNNs** ($A_W$ and $A_H$):
