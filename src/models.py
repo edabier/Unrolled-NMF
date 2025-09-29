@@ -48,7 +48,7 @@ class MU_NMF(nn.Module):
             gpu_info = utils.get_gpu_info()
             utils.log_gpu_info(gpu_info, filename="/home/ids/edabier/AMT/Unrolled-NMF/logs/gpu_info_log.csv")
             
-        H = init.init_H(W, M, n_init_steps=self.n_iter, beta=self.beta, device=device, batch_size=batch_size, dtype=self.dtype)
+        H = init.init_H(W, M, n_init_steps=self.n_iter, beta=self.beta, device=device, dtype=self.dtype)
         
         H = torch.clamp(H, min=self.eps)
             
@@ -428,7 +428,7 @@ class RALMU(nn.Module):
             gpu_info = utils.get_gpu_info()
             utils.log_gpu_info(gpu_info, filename="/home/ids/edabier/AMT/Unrolled-NMF/logs/gpu_info_log.csv")
         
-        H = init.init_H(W, M, n_init_steps=self.n_init_steps, beta=self.beta, device=device, batch_size=batch_size, dtype=self.dtype)
+        H = init.init_H(W, M, n_init_steps=self.n_init_steps, beta=self.beta, device=device, dtype=self.dtype)
         if batch_size is not None:
             H = H.unsqueeze(0).expand(batch_size, -1, -1)
             

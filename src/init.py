@@ -109,7 +109,8 @@ def init_H(W, M, n_init_steps, beta=1, device=None, dtype=None):
         eps = torch.finfo(type=dtype).min
     else:
         eps = torch.finfo().min
-    
+        
+    batch_size = None
     if len(M.shape) > 2:
         batch_size = W.shape[0]
         l = W.shape[2]

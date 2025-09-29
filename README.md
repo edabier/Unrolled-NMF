@@ -24,24 +24,22 @@ To safely use the code of this repository, one needs to install the packages fou
 
 ### Structure
 
-**/src**:
-    contains the implementation of the model and some functions for the training:
+**/src**: Contains the implementation of the model and some functions for the training:
 
-- `init.py`: contains the code to **initialize** the W and H matrix for the MU and unrolled MU models, as well as functions to convert the W and H tensors to a midi tensor.
-- `models.py`: contains the **architecture of the unrolled model**.
-- `spectrograms.py`: contains functions to **compute the CQT sepctrogram** of a signal and visualize it, as well as **midi** and **jams** conversion and visualization functions.
-- `utils.py`: contains some **information retrieval** util functions, the definition of the **datasets**, functions to **compute metrics** and **test models** using mir_eval [[3]](#3), and finally functions to **train** the model.
+- `init.py`: Contains the code to **initialize** the W and H matrix for the MU and unrolled MU models, as well as functions to convert the W and H tensors to a midi tensor.
+- `models.py`: Contains the **architecture of the unrolled model**.
+- `spectrograms.py`: Contains functions to **compute the CQT sepctrogram** of a signal and visualize it, as well as **midi** and **jams** conversion and visualization functions.
+- `utils.py`: Contains some **information retrieval** util functions, the definition of the **datasets**, functions to **compute metrics** and **test models** using mir_eval [[3]](#3), and finally functions to **train** the model.
 
-**/{piano, synth}-dataset**:
-    Contain 7 audio/ MIDI files pair as small toy datasets (recordings from virtual piano and virtual synth).
+**/{piano, synth}-dataset**: Contains 7 audio/ MIDI files pair as small toy datasets (recordings from virtual piano and virtual synth).
 
-**/models**:
-    contains pretrained models weights.
+**/models**: Contains pretrained models weights.
 
-**/test_data**:
-    Contains small audio/ midi pairs example for some tests.
+**/test_data**: Contains small audio/ midi pairs example for some tests.
 
 ### Steps to train:
+
+The files used to run code on the cluster are found on the **/bash_scripts** directory.
 
 - The `training_ralmu.sh` file contains the command to be launched on the cluster to train the model, you can modify here the amount of unrolled iterations that the model has (`ITER`), the learning rate (`LR`), the number of epochs to be made (`EPOCHS`), the batch size (`BATCH`), the size of the subset of the dataset to train on (`SUBSET`), as well as the train/ test split size (`SPLIT`) and whether to clip the H matrix in every unrolled iterations (`CLIP`).
 
