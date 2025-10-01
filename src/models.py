@@ -419,7 +419,7 @@ class RALMU(nn.Module):
         elif len(M.shape) == 2: # Non-batched input (inference phase)
             _, t = M.shape
         
-        W, _, _, _ = init.init_W(self.W_path, normalize_thresh=self.norm_thresh, verbose=self.verbose, dtype=self.dtype)
+        W, _, _, _ = init.init_W(self.W_path, normalize_thresh=self.norm_thresh,dtype=self.dtype)
         if batch_size is not None:
             W = W.unsqueeze(0).expand(batch_size, -1, -1)
             
