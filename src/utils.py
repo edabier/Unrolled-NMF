@@ -450,11 +450,11 @@ def evaluate_model(model, file, device=None):
     """
     Computes the accuracy, recall, precision and f_mesure of the model's prediction on the provided file
     """
-    y, sr = torchaudio.load(f"synth-dataset/audios/{file}")
+    y, sr = torchaudio.load(f"test-data/synth-dataset/audios/{file}")
     M, times, _ = spec.cqt_spec(y, sr, normalize_thresh=0.1)
     single_note = 'test-data/synth-single-notes'
     W, _, _, true_freqs = init.init_W(single_note, normalize_thresh=0.1)
-    midi, _, _, _ = spec.midi_to_pianoroll(f"synth-dataset/midis/{file}", y, times,128,sr)
+    midi, _, _, _ = spec.midi_to_pianoroll(f"test-data/synth-dataset/midis/{file}", y, times,128,sr)
 
     model.eval()
     with torch.no_grad():

@@ -31,11 +31,9 @@ To safely use the code of this repository, one needs to install the packages fou
 - `spectrograms.py`: Contains functions to **compute the CQT sepctrogram** of a signal and visualize it, as well as **midi** and **jams** conversion and visualization functions.
 - `utils.py`: Contains some **information retrieval** util functions, the definition of the **datasets**, functions to **compute metrics** and **test models** using mir_eval [[3]](#3), and finally functions to **train** the model.
 
-**/{piano, synth}-dataset**: Contains 7 audio/ MIDI files pair as small toy datasets (recordings from virtual piano and virtual synth).
-
 **/models**: Contains pretrained models weights.
 
-**/test_data**: Contains small audio/ midi pairs example for some tests.
+**/test_data**: Contains small audio/ midi pairs example for some tests. In this directory, the **/{piano, synth}-dataset** directories contain 7 audio/ MIDI files pair as small toy datasets (recordings from virtual piano and virtual synth).
 
 ### Steps to train:
 
